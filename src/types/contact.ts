@@ -39,13 +39,3 @@ export interface ContactInput {
   company_category?: string
   notes?: string | null
 }
-
-/** A custom audience list (manually curated group of contacts). */
-export interface ContactList {
-  id: string
-  name: string
-  description: string | null
-  created_at: string | null
-  /** Member count, populated by fetchContactLists. */
-  count: number
-}

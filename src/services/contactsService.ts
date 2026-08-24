@@ -1,5 +1,5 @@
 import { supabase } from '../supabase'
-import type { Contact, ContactInput, ContactList, ContactRow } from '../types/contact'
+import type { Contact, ContactInput, ContactRow } from '../types/contact'
 
 const TABLE = 'contacts'
 
@@ -186,174 +186,34 @@ export async function upsertContactsByEmail(inputs: ContactInput[]): Promise<{
   }
 }
 
-// ─── Custom Audience Lists ──────────────────────────────────────────────────
-// Manually curated groups of contacts (e.g. "March Clients", "Hot Leads").
-// These are SEPARATE from the database-driven contact_type values. A contact
-// can belong to many lists and still retain its contact_type. Membership is
-// stored in contact_list_members; the contact row itself is never modified.
+// ─── Contact Types (segments) ───────────────────────────────────────────────
+// A "list" in the UI is really a contact TYPE / segment. These live in the
+// existing `contact_types` table (columns: id, name, is_active, created_at).
+// We never create or write to a `contact_lists` table — contacts reference a
+// type by the `contacts.contact_type` TEXT value matching `contact_types.name`.
 
-/** List all custom lists with their current member counts. */
-export async function fetchContactLists(): Promise<{ data: ContactList[]; error: string | null }> {
-  try {
-    const { data: lists, error } = await supabase
-      .from('contact_lists')
-      .select('*')
-      .order('name')
-
-    if (error) return { data: [], error: error.message }
-
-    // Count members per list in a single query, then attach to each list.
-    const { data: members, error: memError } = await supabase
-      .from('contact_list_members')
-      .select('list_id')
-
-    const counts: Record<string, number> = {}
-    if (!memError && members) {
-      for (const m of members as { list_id: string }[]) {
-        counts[m.list_id] = (counts[m.list_id] || 0) + 1
-      }
-    }
-
-    const data = ((lists as Record<string, any>[]) || []).map((l) => ({
-      id: String(l.id),
-      name: l.name,
-      description: l.description ?? null,
-      created_at: l.created_at ?? null,
-      count: counts[String(l.id)] || 0,
-    }))
-
-    return { data, error: null }
-  } catch (err) {
-    return { data: [], error: err instanceof Error ? err.message : 'Failed to load lists' }
-  }
-}
-
-/** Create a new custom list. Returns the created row (with count 0). */
-export async function createContactList(
-  name: string,
-  description?: string
-): Promise<{ data: ContactList | null; error: string | null }> {
+/** Create a new contact type / segment. Returns the created row. */
+export async function createContactType(
+  name: string
+): Promise<{ data: { id: string; name: string; is_active: boolean } | null; error: string | null }> {
   try {
     const { data, error } = await supabase
-      .from('contact_lists')
+      .from('contact_types')
       .insert({
         name: name.trim(),
-        description: description && description.trim() ? description.trim() : null,
+        is_active: true,
       })
-      .select('*')
+      .select('id, name, is_active')
       .single()
 
     if (error) return { data: null, error: error.message }
-    const row = data as Record<string, any>
+    const row = data as { id: any; name: string; is_active: boolean }
     return {
-      data: {
-        id: String(row.id),
-        name: row.name,
-        description: row.description ?? null,
-        created_at: row.created_at ?? null,
-        count: 0,
-      },
+      data: { id: String(row.id), name: row.name, is_active: row.is_active },
       error: null,
     }
   } catch (err) {
-    return { data: null, error: err instanceof Error ? err.message : 'Failed to create list' }
+    return { data: null, error: err instanceof Error ? err.message : 'Failed to create contact type' }
   }
 }
 
-/** Rename a custom list (name only — memberships and id are unchanged). */
-export async function renameContactList(
-  id: string,
-  name: string
-): Promise<{ error: string | null }> {
-  try {
-    const { error } = await supabase
-      .from('contact_lists')
-      .update({ name: name.trim() })
-      .eq('id', id)
-    return { error: error?.message ?? null }
-  } catch (err) {
-    return { error: err instanceof Error ? err.message : 'Failed to rename list' }
-  }
-}
-
-/** Delete a custom list and its membership rows (never touches contacts). */
-export async function deleteContactList(id: string): Promise<{ error: string | null }> {
-  try {
-    const { error } = await supabase.from('contact_lists').delete().eq('id', id)
-    return { error: error?.message ?? null }
-  } catch (err) {
-    return { error: err instanceof Error ? err.message : 'Failed to delete list' }
-  }
-}
-
-/**
- * Add one or more contacts to a list. Uses upsert-by-unique semantics
- * (insert ... on conflict do nothing) so re-adding a member is a no-op rather
- * than a duplicate row. A contact is never removed from All Contacts.
- */
-export async function addContactsToList(
-  listId: string,
-  contactIds: string[]
-): Promise<{ error: string | null; added: number }> {
-  try {
-    if (contactIds.length === 0) return { error: null, added: 0 }
-    const rows = contactIds.map((cid) => ({ list_id: listId, contact_id: cid }))
-    const { error } = await supabase
-      .from('contact_list_members')
-      .upsert(rows, { onConflict: 'list_id,contact_id', ignoreDuplicates: true })
-    if (error) return { error: error.message, added: 0 }
-    return { error: null, added: contactIds.length }
-  } catch (err) {
-    return { error: err instanceof Error ? err.message : 'Failed to add contacts', added: 0 }
-  }
-}
-
-/** Remove a single contact from a list (deletes only the membership row). */
-export async function removeContactFromList(
-  listId: string,
-  contactId: string
-): Promise<{ error: string | null }> {
-  try {
-    const { error } = await supabase
-      .from('contact_list_members')
-      .delete()
-      .eq('list_id', listId)
-      .eq('contact_id', contactId)
-    return { error: error?.message ?? null }
-  } catch (err) {
-    return { error: err instanceof Error ? err.message : 'Failed to remove contact' }
-  }
-}
-
-/**
- * Fetch the contacts that are members of a list. Used by the Contacts page to
- * render a custom-list view. Members are looked up via contact_list_members →
- * contacts, exactly as the campaign recipient query does.
- */
-export async function fetchListMembers(listId: string): Promise<{ data: Contact[]; error: string | null }> {
-  try {
-    const { data: members, error: memError } = await supabase
-      .from('contact_list_members')
-      .select('contact_id')
-      .eq('list_id', listId)
-
-    if (memError) return { data: [], error: memError.message }
-    const ids = Array.from(
-      new Set(((members as { contact_id: string }[]) || []).map((m) => m.contact_id))
-    )
-    if (ids.length === 0) return { data: [], error: null }
-
-    const { data, error } = await supabase.from('contacts').select('*').in('id', ids)
-    if (error) return { data: [], error: error.message }
-
-    const byId = new Map(ids.map((id, i) => [id, i]))
-    const rows = (data as ContactRow[] | null) ?? []
-    // Preserve list membership order.
-    const ordered = [...rows].sort(
-      (a, b) => (byId.get(a.id) ?? 0) - (byId.get(b.id) ?? 0)
-    )
-    return { data: ordered.map(mapRowToContact), error: null }
-  } catch (err) {
-    return { data: [], error: err instanceof Error ? err.message : 'Failed to load list members' }
-  }
-}

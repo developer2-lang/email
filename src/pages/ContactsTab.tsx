@@ -8,15 +8,8 @@ import {
   deleteContact,
   deleteContacts,
   upsertContactsByEmail,
-  fetchContactLists,
-  createContactList,
-  renameContactList,
-  deleteContactList,
-  addContactsToList,
-  removeContactFromList,
-  fetchListMembers,
+  createContactType,
 } from '../services/contactsService';
-import type { ContactList } from '../types/contact';
 import { supabase } from '../supabase';
 
 // Standardized icon components for sleek UI
@@ -304,28 +297,13 @@ export default function ContactsTab({
   const [ctLoading, setCtLoading] = useState(true);
   const [ctError, setCtError] = useState<string | null>(null);
 
-  // ─── CUSTOM AUDIENCE LISTS ───
-  const [contactLists, setContactLists] = useState<ContactList[]>([]);
-  const [listsLoading, setListsLoading] = useState(true);
-  // When set, the table filters to the members of this list (custom-list view).
-  const [viewedListId, setViewedListId] = useState<string | null>(null);
-  const [listMembers, setListMembers] = useState<Contact[]>([]);
-  const [dragOverListId, setDragOverListId] = useState<string | null>(null);
-  // Create-list modal
+  // ─── CREATE CONTACT TYPE / SEGMENT MODAL STATE ───
+  // The "Create List" action creates a new CONTACT TYPE (segment) in the
+  // existing `contact_types` table — never a `contact_lists` table.
   const [isCreateListOpen, setIsCreateListOpen] = useState(false);
   const [newListName, setNewListName] = useState('');
   const [newListDesc, setNewListDesc] = useState('');
   const [creatingList, setCreatingList] = useState(false);
-  // Rename-list modal
-  const [renamingList, setRenamingList] = useState<ContactList | null>(null);
-  const [renameValue, setRenameValue] = useState('');
-  const [renaming, setRenaming] = useState(false);
-  // Per-list ⋯ menu (only one open at a time)
-  const [openMenuListId, setOpenMenuListId] = useState<string | null>(null);
-  // Contact being dragged (for drag-and-drop onto a list)
-  const [draggingContactId, setDraggingContactId] = useState<string | null>(null);
-  // Bulk "Add to List" menu open state
-  const [addToListOpen, setAddToListOpen] = useState(false);
 
   // Default contact type: "New Lead" if present, otherwise the first active type.
   const defaultContactType = useMemo(() => {
@@ -383,6 +361,8 @@ export default function ContactsTab({
   }, [refreshContacts]);
 
   // ─── LOAD CONTACT TYPES FROM SUPABASE ───
+  // These are the available contact types / segments, stored in the existing
+  // `contact_types` table. "Create List" adds a new row here.
   useEffect(() => {
     let cancelled = false;
     const loadContactTypes = async () => {
@@ -410,40 +390,11 @@ export default function ContactsTab({
     };
   }, []);
 
-  // ─── LOAD CUSTOM LISTS FROM SUPABASE ───
-  const refreshLists = useCallback(async () => {
-    setListsLoading(true);
-    const { data, error } = await fetchContactLists();
-    if (!error) setContactLists(data);
-    setListsLoading(false);
-  }, []);
-
-  useEffect(() => {
-    void refreshLists();
-  }, [refreshLists]);
-
-  // ─── CUSTOM LIST ACTIONS ───
-  const openList = useCallback(
-    async (listId: string) => {
-      setViewedListId(listId);
-      setCTypeFilter('all');
-      setSelectedIds(new Set());
-      const { data, error } = await fetchListMembers(listId);
-      if (error) {
-        onToast('Failed to load list members: ' + error, 'error');
-        setListMembers([]);
-      } else {
-        setListMembers(data);
-      }
-    },
-    [onToast]
-  );
-
-  const clearListView = useCallback(() => {
-    setViewedListId(null);
-    setListMembers([]);
-  }, []);
-
+  // ─── CREATE CONTACT TYPE / SEGMENT ───
+  // The "Create List" action creates a new CONTACT TYPE (segment) in the existing
+  // `contact_types` table. The new type then appears in the type filter pills
+  // and in the Campaign → Audience Segment dropdown, with a contact count of 0
+  // until contacts are assigned to it. We never write to a `contact_lists` table.
   const handleCreateList = async () => {
     if (creatingList) return;
     if (!newListName.trim()) {
@@ -452,7 +403,7 @@ export default function ContactsTab({
     }
     setCreatingList(true);
     try {
-      const { data, error } = await createContactList(newListName.trim(), newListDesc.trim());
+      const { data, error } = await createContactType(newListName.trim());
       if (error) {
         onToast('Failed to create list: ' + error, 'error');
         return;
@@ -461,105 +412,15 @@ export default function ContactsTab({
       setNewListName('');
       setNewListDesc('');
       if (data) {
-        setContactLists((prev) => [...prev, data].sort((a, b) => a.name.localeCompare(b.name)));
+        // Add the newly created type/segment to the list the UI filters by.
+        setContactTypes((prev) =>
+          [...prev, { id: data.id, name: data.name }].sort((a, b) => a.name.localeCompare(b.name))
+        );
         onToast(`List "${data.name}" created`, 'success');
-      } else {
-        await refreshLists();
       }
     } finally {
       setCreatingList(false);
     }
-  };
-
-  const handleRenameList = async () => {
-    if (renaming || !renamingList) return;
-    if (!renameValue.trim()) {
-      onToast('List name is required', 'error');
-      return;
-    }
-    setRenaming(true);
-    try {
-      const { error } = await renameContactList(renamingList.id, renameValue.trim());
-      if (error) {
-        onToast('Failed to rename list: ' + error, 'error');
-        return;
-      }
-      setContactLists((prev) =>
-        [...prev.map((l) => (l.id === renamingList.id ? { ...l, name: renameValue.trim() } : l))].sort(
-          (a, b) => a.name.localeCompare(b.name)
-        )
-      );
-      if (viewedListId === renamingList.id) {
-        setListMembers((m) => m); // name-only change; members unaffected
-      }
-      setRenamingList(null);
-      setRenameValue('');
-      onToast('List renamed', 'success');
-    } finally {
-      setRenaming(false);
-    }
-  };
-
-  const handleDeleteList = async (list: ContactList) => {
-    if (!confirm(`Delete list "${list.name}"? Its members will be removed but contacts are kept.`)) return;
-    const { error } = await deleteContactList(list.id);
-    if (error) {
-      onToast('Failed to delete list: ' + error, 'error');
-      return;
-    }
-    setContactLists((prev) => prev.filter((l) => l.id !== list.id));
-    if (viewedListId === list.id) clearListView();
-    onToast(`List "${list.name}" deleted`, 'info');
-  };
-
-  // Drag a contact (or several selected) onto a list card.
-  const handleDropOnList = async (listId: string, e: React.DragEvent) => {
-    e.preventDefault();
-    setDragOverListId(null);
-    const dragId = draggingContactId;
-    setDraggingContactId(null);
-
-    let ids: string[] = [];
-    if (dragId) {
-      ids = [dragId];
-    } else if (selectedIds.size > 0) {
-      ids = Array.from(selectedIds) as string[];
-    }
-    if (ids.length === 0) return;
-
-    const { error, added } = await addContactsToList(listId, ids);
-    if (error) {
-      onToast('Failed to add contacts: ' + error, 'error');
-      return;
-    }
-    // Refresh counts (and the open list view, if it's the one dropped on).
-    await refreshLists();
-    const list = contactLists.find((l) => l.id === listId);
-    const listName = list ? list.name : 'list';
-    if (added === 0) {
-      onToast(`Contact is already in ${listName}`, 'info');
-    } else {
-      onToast(
-        `${added} contact${added === 1 ? '' : 's'} added to ${listName}`,
-        'success'
-      );
-      if (viewedListId === listId) {
-        const { data } = await fetchListMembers(listId);
-        if (data) setListMembers(data);
-      }
-    }
-  };
-
-  const handleRemoveFromList = async (contactId: string) => {
-    if (!viewedListId) return;
-    const { error } = await removeContactFromList(viewedListId, contactId);
-    if (error) {
-      onToast('Failed to remove from list: ' + error, 'error');
-      return;
-    }
-    setListMembers((prev) => prev.filter((c) => c.id !== contactId));
-    await refreshLists();
-    onToast('Removed from list', 'info');
   };
 
   // ─── CONTACT METRICS ───
@@ -578,9 +439,7 @@ export default function ContactsTab({
 
   // ─── CONTACTS FILTERING & SORTING ───
   const filteredContacts = useMemo(() => {
-    // When viewing a custom list, the base set is the list's members.
-    const base =
-      viewedListId && listMembers.length >= 0 ? listMembers : contacts;
+    const base = contacts;
     let result = [...base];
 
     if (cSearchVal.trim()) {
@@ -593,7 +452,7 @@ export default function ContactsTab({
       );
     }
 
-    if (viewedListId == null && cTypeFilter !== 'all') {
+    if (cTypeFilter !== 'all') {
       result = result.filter(c => c.type === cTypeFilter);
     }
 
@@ -610,7 +469,7 @@ export default function ContactsTab({
     });
 
     return result;
-  }, [contacts, listMembers, viewedListId, cSearchVal, cTypeFilter, cCatFilter, cSortKey, cSortDir]);
+  }, [contacts, cSearchVal, cTypeFilter, cCatFilter, cSortKey, cSortDir]);
 
   const paginatedContacts = useMemo(() => {
     const start = (cPage - 1) * C_PER_PAGE;
@@ -966,22 +825,10 @@ export default function ContactsTab({
         <div className="ct-toolbar">
           <div>
             <div className="ct-panel-title">
-              {viewedListId
-                ? (() => {
-                    const l = contactLists.find((x) => x.id === viewedListId);
-                    return l ? `${l.name} (${listMembers.length})` : 'Contacts';
-                  })()
-                : 'Contacts'}
+              Contacts
             </div>
             <div className="ct-record-count">
-              {viewedListId
-                ? `${listMembers.length} member${listMembers.length === 1 ? '' : 's'}`
-                : `${contacts.length} records`}
-              {viewedListId && (
-                <button className="ct-clear-list" onClick={clearListView}>
-                  ← All Contacts
-                </button>
-              )}
+              {contacts.length} records
             </div>
           </div>
           <div className="ct-toolbar-right">
@@ -1015,65 +862,48 @@ export default function ContactsTab({
           {typeTabs.map(tab => (
             <button
               key={tab.id}
-              className={`ct-tab ${viewedListId == null && cTypeFilter === tab.id ? 'active' : ''}`}
-              onClick={() => { clearListView(); setCTypeFilter(tab.id); setCPage(1); }}
+              className={`ct-tab ${cTypeFilter === tab.id ? 'active' : ''}`}
+              onClick={() => { setCTypeFilter(tab.id); setCPage(1); }}
             >
               {tab.label}
             </button>
           ))}
         </div>
 
-        {/* ─── CUSTOM AUDIENCE LISTS ─── */}
+        {/* ─── CONTACT TYPES / SEGMENTS ─── */}
+        {/* "Create List" adds a new contact type/segment to the existing
+            contact_types table. Each type card filters the grid and shows how
+            many contacts currently belong to that type (0 until assigned). */}
         <div className="my-lists">
           <div className="my-lists-head">
-            <span className="my-lists-title">My Lists</span>
+            <span className="my-lists-title">Contact Types</span>
             <button className="btn btn-list-add" onClick={() => setIsCreateListOpen(true)}>
               <PlusIcon size={14} /> Create List
             </button>
           </div>
-          {listsLoading ? (
-            <div className="my-lists-loading">Loading lists…</div>
-          ) : contactLists.length === 0 ? (
-            <div className="my-lists-empty">No custom lists yet. Create one to group contacts manually.</div>
+          {ctLoading ? (
+            <div className="my-lists-loading">Loading contact types…</div>
+          ) : ctError ? (
+            <div className="my-lists-empty">Failed to load contact types.</div>
+          ) : contactTypes.length === 0 ? (
+            <div className="my-lists-empty">No contact types yet. Create one to segment contacts.</div>
           ) : (
             <div className="my-lists-row">
-              {contactLists.map(list => {
-                const isViewing = viewedListId === list.id;
-                const isDropTarget = dragOverListId === list.id;
+              {contactTypes.map(t => {
+                const count = contacts.filter(c => (c.type || '') === t.name).length;
+                const isActive = cTypeFilter === t.name;
                 return (
                   <div
-                    key={list.id}
-                    className={`list-card ${isViewing ? 'active' : ''} ${isDropTarget ? 'drop-target' : ''}`}
-                    onClick={() => openList(list.id)}
-                    onDragOver={(e) => { e.preventDefault(); setDragOverListId(list.id); }}
-                    onDragLeave={() => setDragOverListId((cur) => (cur === list.id ? null : cur))}
-                    onDrop={(e) => { e.stopPropagation(); void handleDropOnList(list.id, e); }}
+                    key={t.id}
+                    className={`list-card ${isActive ? 'active' : ''}`}
+                    onClick={() => { setCTypeFilter(isActive ? 'all' : t.name); setCPage(1); }}
                   >
                     <div className="list-card-top">
-                      <span className="list-card-name">{list.name}</span>
-                      <span
-                        className="list-card-menu"
-                        title="List options"
-                        onClick={(e) => { e.stopPropagation(); setOpenMenuListId((cur) => (cur === list.id ? null : list.id)); }}
-                      >⋯</span>
+                      <span className="list-card-name">{t.name}</span>
                     </div>
                     <div className="list-card-count">
-                      {list.name} ({list.count})
+                      {count} contact{count === 1 ? '' : 's'}
                     </div>
-                    <div className="list-card-drop">{isDropTarget ? 'Drop to add' : 'Drop contacts here'}</div>
-
-                    {openMenuListId === list.id && (
-                      <div className="list-menu" onClick={(e) => e.stopPropagation()}>
-                        <button
-                          className="list-menu-item"
-                          onClick={() => { setRenamingList(list); setRenameValue(list.name); setOpenMenuListId(null); }}
-                        >Rename</button>
-                        <button
-                          className="list-menu-item danger"
-                          onClick={() => { setOpenMenuListId(null); void handleDeleteList(list); }}
-                        >Delete</button>
-                      </div>
-                    )}
                   </div>
                 );
               })}
@@ -1143,13 +973,6 @@ export default function ContactsTab({
                   return (
                     <tr
                       key={c.id}
-                      draggable
-                      onDragStart={(e) => {
-                        setDraggingContactId(c.id);
-                        e.dataTransfer.setData('text/plain', String(c.id));
-                        e.dataTransfer.effectAllowed = 'copy';
-                      }}
-                      onDragEnd={() => { setDraggingContactId(null); setDragOverListId(null); }}
                       style={selectedIds.has(c.id) ? { background: 'var(--accent-light)' } : undefined}
                     >
                       <td>
@@ -1212,15 +1035,6 @@ export default function ContactsTab({
                           >
                             <TrashIcon size={15} />
                           </button>
-                          {viewedListId && (
-                            <button
-                              title="Remove from list"
-                              onClick={() => handleRemoveFromList(c.id)}
-                              className="ct-ibtn ct-ibtn-remove"
-                            >
-                              Remove
-                            </button>
-                          )}
                         </div>
                       </td>
                     </tr>
@@ -1301,45 +1115,6 @@ export default function ContactsTab({
             >
               <TrashIcon /> Delete
             </button>
-            {contactLists.length > 0 && (
-              <div className="bulkbar-list-wrap">
-                <button
-                  onClick={() => setAddToListOpen((o) => !o)}
-                  className="bulkbar-btn bulkbar-btn-list"
-                >
-                  Add to List ▾
-                </button>
-                {addToListOpen && (
-                  <div className="bulkbar-list-menu" onMouseLeave={() => setAddToListOpen(false)}>
-                    {contactLists.map((list) => (
-                      <button
-                        key={list.id}
-                        className="bulkbar-list-item"
-                        onClick={async () => {
-                          setAddToListOpen(false);
-                          const ids = Array.from(selectedIds) as string[];
-                          const { error, added } = await addContactsToList(list.id, ids);
-                          if (error) {
-                            onToast('Failed to add to list: ' + error, 'error');
-                          } else if (added === 0) {
-                            onToast('Selected contacts already in ' + list.name, 'info');
-                          } else {
-                            onToast(`${added} contact${added === 1 ? '' : 's'} added to ${list.name}`, 'success');
-                            await refreshLists();
-                            if (viewedListId === list.id) {
-                              const { data } = await fetchListMembers(list.id);
-                              if (data) setListMembers(data);
-                            }
-                          }
-                        }}
-                      >
-                        {list.name} ({list.count})
-                      </button>
-                    ))}
-                  </div>
-                )}
-              </div>
-            )}
           </div>
         </div>
       )}
@@ -1676,46 +1451,6 @@ export default function ContactsTab({
               </button>
               <button className="btn btn-primary" disabled={creatingList} onClick={handleCreateList}>
                 {creatingList ? 'Creating…' : 'Create List'}
-              </button>
-            </div>
-          </div>
-        </div>
-      )}
-
-      {/* ─── MODAL: RENAME LIST ─── */}
-      {renamingList && (
-        <div className="modal-overlay">
-          <div className="modal">
-            <div className="modal-header">
-              <div>
-                <div className="modal-title">Rename List</div>
-                <div className="ct-sub" style={{ marginTop: 3 }}>
-                  Rename “{renamingList.name}”. Members and the list ID stay unchanged.
-                </div>
-              </div>
-              <button className="modal-close" onClick={() => setRenamingList(null)} title="Close">
-                <CloseIcon size={16} />
-              </button>
-            </div>
-
-            <div className="modal-body">
-              <div className="form-group">
-                <label>List Name *</label>
-                <input
-                  type="text"
-                  value={renameValue}
-                  onChange={(e) => setRenameValue(e.target.value)}
-                  autoFocus
-                />
-              </div>
-            </div>
-
-            <div className="modal-footer">
-              <button className="btn btn-ghost" onClick={() => setRenamingList(null)}>
-                Cancel
-              </button>
-              <button className="btn btn-primary" disabled={renaming} onClick={handleRenameList}>
-                {renaming ? 'Saving…' : 'Rename'}
               </button>
             </div>
           </div>

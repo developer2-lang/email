@@ -29,9 +29,8 @@ import {
   deleteEmailTemplate,
   formatFileSize,
 } from '../services/campaignService';
-import { fetchContacts, fetchContactLists, fetchListMembers } from '../services/contactsService';
-import type { ContactList } from '../types/contact';
-import { resolveSegmentRecipients, resolveContactListRecipients, isManualAudience } from '../utils/contactSegment';
+import { fetchContacts } from '../services/contactsService';
+import { resolveSegmentRecipients, isManualAudience } from '../utils/contactSegment';
 import {
   fetchPendingFollowups,
   sendPendingFollowup,
@@ -732,12 +731,6 @@ export default function CampaignsTab({
   // ─── DROPDOWN OPTIONS (loaded from Supabase, not hardcoded) ───
   const [audienceSegments, setAudienceSegments] = useState<{ id: string; name: string }[]>([]);
   const [campaignTypes, setCampaignTypes] = useState<{ id: string; name: string }[]>([]);
-  // Custom audience lists (manually curated groups) — become Campaign segments.
-  const [contactLists, setContactLists] = useState<ContactList[]>([]);
-  // Resolved recipient counts for custom lists, computed with the SAME
-  // valid-email + dedup rules the send path uses, so the dropdown number for a
-  // custom list always equals the contacts actually emailed.
-  const [customRecipientCounts, setCustomRecipientCounts] = useState<Record<string, number>>({});
   const [dropdownsLoading, setDropdownsLoading] = useState(true);
   const [dropdownsError, setDropdownsError] = useState<string | null>(null);
 
@@ -951,23 +944,6 @@ export default function CampaignsTab({
     }
   }, []);
 
-  // Load custom audience lists (also used as Campaign Audience Segments).
-  const refreshContactLists = useCallback(async () => {
-    const { data, error } = await fetchContactLists();
-    if (error || !data) { setContactLists([]); return; }
-    setContactLists(data);
-    // Resolve the same recipient count the send path will use for each custom
-    // list: fetch its members and keep only contacts with a valid, unique email.
-    const counts: Record<string, number> = {};
-    await Promise.all(
-      data.map(async (l) => {
-        const { data: members } = await fetchListMembers(l.id);
-        counts[l.name] = resolveContactListRecipients(members || []).length;
-      })
-    );
-    setCustomRecipientCounts(counts);
-  }, []);
-
   useEffect(() => {
     const load = async () => {
       await Promise.all([
@@ -975,11 +951,10 @@ export default function CampaignsTab({
         loadTemplates(),
         loadAudienceContacts(),
         loadDropdownOptions(),
-        refreshContactLists(),
       ]);
     };
     void load();
-  }, [refreshCampaigns, loadTemplates, loadAudienceContacts, loadDropdownOptions, refreshContactLists]);
+  }, [refreshCampaigns, loadTemplates, loadAudienceContacts, loadDropdownOptions]);
 
   // Auto-refresh the campaign list while it is on screen so Open Rate /
   // Click Rate update after sending and as recipients engage.
@@ -1178,16 +1153,8 @@ export default function CampaignsTab({
   //   New Clients            → contact_type starts with 'new client'
   //   New Leads              → contact_type = 'new lead'
   const getSegmentCount = (segment: string) => {
-    // Custom audience list → resolved recipient count (valid email + dedup),
-    // identical to what the send path computes from contact_list_members.
-    const customList = contactLists.find((l) => l.name === segment);
-    if (customList) return customRecipientCounts[segment] ?? customList.count;
     return resolveSegmentRecipients(audienceContacts, segment).length;
   };
-
-  // True when the selected segment is one of the custom lists.
-  const isCustomListSegment = (segment: string) =>
-    contactLists.some((l) => l.name === segment);
 
   // ─── LAUNCH OR SCHEDULE ───
   const handleSaveCampaign = async (status: 'sent' | 'scheduled' | 'draft') => {
@@ -2087,12 +2054,8 @@ setCompBody('');
                       {audienceSegments.map((s) => (
                         <option key={s.id} value={s.name}>{s.name} ({getSegmentCount(s.name)})</option>
                       ))}
-                      {contactLists.map((l) => (
-                        <option key={l.id} value={l.name}>{l.name} ({l.count})</option>
-                      ))}
                       {(compAudience && compAudience !== 'All Contacts' &&
-                        !audienceSegments.some((s) => s.name === compAudience) &&
-                        !isCustomListSegment(compAudience)) && (
+                        !audienceSegments.some((s) => s.name === compAudience)) && (
                         <option value={compAudience}>
                           {isManualAudience(compAudience)
                             ? `Selected Contacts (${getSegmentCount(compAudience)})`
