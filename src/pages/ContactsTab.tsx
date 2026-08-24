@@ -412,10 +412,10 @@ export default function ContactsTab({
       setNewListName('');
       setNewListDesc('');
       if (data) {
-        // Add the newly created type/segment to the list the UI filters by.
-        setContactTypes((prev) =>
-          [...prev, { id: data.id, name: data.name }].sort((a, b) => a.name.localeCompare(b.name))
-        );
+        // Add the newly created type/segment to the SAME list the tab row
+        // reads from, appending it at the end so it appears immediately as a
+        // new tab without a page refresh.
+        setContactTypes((prev) => [...prev, { id: data.id, name: data.name }]);
         onToast(`List "${data.name}" created`, 'success');
       }
     } finally {
@@ -857,7 +857,12 @@ export default function ContactsTab({
           </div>
         </div>
 
-        {/* Segment pills */}
+        {/* Segment pills — single source of truth for lists.
+            "All Contacts" is first, then every contact type (segment) created
+            via + Create List, then the + Create List action itself (always last
+            and always visible). Newly created lists appear here immediately
+            because `typeTabs` is derived from `contactTypes`, which is updated
+            by handleCreateList. */}
         <div className="ct-tabs">
           {typeTabs.map(tab => (
             <button
@@ -868,47 +873,12 @@ export default function ContactsTab({
               {tab.label}
             </button>
           ))}
-        </div>
-
-        {/* ─── CONTACT TYPES / SEGMENTS ─── */}
-        {/* "Create List" adds a new contact type/segment to the existing
-            contact_types table. Each type card filters the grid and shows how
-            many contacts currently belong to that type (0 until assigned). */}
-        <div className="my-lists">
-          <div className="my-lists-head">
-            <span className="my-lists-title">Contact Types</span>
-            <button className="btn btn-list-add" onClick={() => setIsCreateListOpen(true)}>
-              <PlusIcon size={14} /> Create List
-            </button>
-          </div>
-          {ctLoading ? (
-            <div className="my-lists-loading">Loading contact types…</div>
-          ) : ctError ? (
-            <div className="my-lists-empty">Failed to load contact types.</div>
-          ) : contactTypes.length === 0 ? (
-            <div className="my-lists-empty">No contact types yet. Create one to segment contacts.</div>
-          ) : (
-            <div className="my-lists-row">
-              {contactTypes.map(t => {
-                const count = contacts.filter(c => (c.type || '') === t.name).length;
-                const isActive = cTypeFilter === t.name;
-                return (
-                  <div
-                    key={t.id}
-                    className={`list-card ${isActive ? 'active' : ''}`}
-                    onClick={() => { setCTypeFilter(isActive ? 'all' : t.name); setCPage(1); }}
-                  >
-                    <div className="list-card-top">
-                      <span className="list-card-name">{t.name}</span>
-                    </div>
-                    <div className="list-card-count">
-                      {count} contact{count === 1 ? '' : 's'}
-                    </div>
-                  </div>
-                );
-              })}
-            </div>
-          )}
+          <button
+            className="ct-tab ct-tab-create"
+            onClick={() => setIsCreateListOpen(true)}
+          >
+            <PlusIcon size={14} /> Create List
+          </button>
         </div>
 
         {/* ─── CONTACTS TABLE ─── */}
