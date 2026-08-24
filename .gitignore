@@ -1,0 +1,12 @@
+node_modules
+dist
+dist-ssr
+*.local
+.DS_Store
+npm-debug.log*
+yarn-error.log*
+
+# Environment variables (never commit real secrets)
+.env
+.env.*
+!.env.example

@@ -1,0 +1,14 @@
+# Node
+node_modules/
+npm-debug.log*
+yarn-error.log*
+
+# Environment variables (never commit real secrets)
+.env
+.env.local
+.env.*
+!.env.example
+
+# Logs
+logs/
+*.log

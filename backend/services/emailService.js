@@ -1,0 +1,209 @@
+/**
+ * Nodemailer email service.
+ *
+ * Provides sendEmail() for single messages and sendBulkEmail() for a list
+ * of recipients. A shared transporter is created lazily on first use.
+ */
+import nodemailer from 'nodemailer';
+import { randomUUID } from 'node:crypto';
+import emailConfig from '../config/email.js';
+import trackingConfig from '../config/tracking.js';
+import { stripHtml, wrapHtmlDocument, toEmailSafeHtml } from '../utils/emailTemplate.js';
+
+let _transporter = null;
+
+/**
+ * Builds a unique Message-ID whose domain matches the From address, e.g.
+ * <3f7a…@gmail.com>. A per-message random UUID guarantees uniqueness.
+ *
+ * @returns {string}
+ */
+function buildMessageId() {
+  const source = String(emailConfig.from || '');
+  const match =
+    source.match(/<([A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Za-z]{2,})>/) ||
+    source.match(/([A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Za-z]{2,})/);
+  const address = match ? match[1] : '';
+  const domain = (address.split('@')[1] || 'localhost').toLowerCase();
+  return `<${randomUUID()}@${domain}>`;
+}
+
+function getTransporter() {
+  if (!_transporter) {
+    _transporter = nodemailer.createTransport({
+      host: emailConfig.host,
+      port: emailConfig.port,
+      secure: emailConfig.secure,
+      auth: emailConfig.auth,
+    });
+  }
+  return _transporter;
+}
+
+/**
+ * Verify that the SMTP connection is reachable.
+ *
+ * @returns {Promise<{success: boolean, error?: string}>}
+ */
+async function verifyConnection() {
+  try {
+    await getTransporter().verify();
+    return { success: true };
+  } catch (error) {
+    return { success: false, error: error.message };
+  }
+}
+
+/**
+ * Send a single email.
+ *
+ * @param {object} options
+ * @param {string} options.to      - Recipient email address.
+ * @param {string} options.subject - Email subject line.
+ * @param {string} options.html    - HTML body.
+ * @param {string} [options.text]  - Optional plain-text body (auto-generated if omitted).
+ * @param {Array}  [options.attachments] - Optional nodemailer attachment list
+ *   ([{ filename, content }]) embedded in the outgoing message. Defaults to none,
+ *   so existing callers keep the exact current message structure.
+ * @returns {Promise<{success: boolean, messageId: string, response: string}>}
+ */
+function rewriteHtmlForTracking(html, { campaignId, recipientId, baseUrl = trackingConfig.baseUrl } = {}) {
+  if (!html || typeof html !== 'string') return html;
+
+  const normalizedBaseUrl = String(baseUrl || '').replace(/\/+$/, '');
+  if (!normalizedBaseUrl) return html;
+
+  let rewritten = html.replace(
+    /(<a\b[^>]*\bhref\s*=\s*)(["']?)(https?:\/\/[^"'\s>]+)(["']?)/gi,
+    (match, prefix, quote, url) => {
+      if (url.includes('/api/tracking/click/')) {
+        return match;
+      }
+
+      const encoded = encodeURIComponent(url);
+      const trackingPath = campaignId && recipientId
+        ? `${normalizedBaseUrl}/api/tracking/click/${campaignId}/${recipientId}?url=${encoded}`
+        : `${normalizedBaseUrl}/api/tracking/click/${campaignId || recipientId || 'unknown'}?url=${encoded}`;
+
+      const closingQuote = quote || '';
+      return `${prefix}${quote}${trackingPath}${closingQuote}`;
+    }
+  );
+
+  rewritten = rewritten.replace(
+    /(^|[^"'=])\b(https?:\/\/[^\s<>"']+)\b/gi,
+    (match, prefix, url) => {
+      if (url.includes('/api/tracking/click/')) return match;
+      const encoded = encodeURIComponent(url);
+      const trackingPath = campaignId && recipientId
+        ? `${normalizedBaseUrl}/api/tracking/click/${campaignId}/${recipientId}?url=${encoded}`
+        : `${normalizedBaseUrl}/api/tracking/click/${campaignId || recipientId || 'unknown'}?url=${encoded}`;
+      return `${prefix}<a href="${trackingPath}">${url}</a>`;
+    }
+  );
+
+  return rewritten;
+}
+
+function appendTrackingPixel(html, { trackingId, baseUrl = trackingConfig.baseUrl } = {}) {
+  if (!html || typeof html !== 'string') return html;
+  if (!trackingId) return html;
+
+  const normalizedBaseUrl = String(baseUrl || '').replace(/\/+$/, '');
+  if (!normalizedBaseUrl) return html;
+
+  const pixelUrl = `${normalizedBaseUrl}/api/tracking/open/${trackingId}`;
+  console.log('[EmailService] open pixel URL:', pixelUrl);
+
+  // A normal 1x1 pixel with display:block — NOT display:none / opacity:0. Hidden
+  // or zero-opacity images are more likely to be stripped by spam filters or
+  // skipped by image loaders, which is exactly the Inbox-vs-Spam difference we
+  // want to remove from our side.
+  const pixel =
+    `<img src="${pixelUrl}" ` +
+    `width="1" height="1" border="0" alt="" style="display:block;border:0;width:1px;height:1px;max-width:1px;max-height:1px;" />`;
+
+  if (/<\/body>/i.test(html)) {
+    return html.replace(/<\/body>/i, `${pixel}</body>`);
+  }
+
+  return `${html}${pixel}`;
+}
+
+async function sendEmail({ to, subject, html, text, campaignId, recipientId, trackingId, attachments }) {
+  const inputHtml = String(html || '');
+  const hasOpenPixel = /\/api\/tracking\/open\/[^"'\s>]+/i.test(inputHtml);
+  const hasClickLinks = /\/api\/tracking\/click\//i.test(inputHtml);
+
+  console.log('[EmailService] hasOpenPixel:', hasOpenPixel);
+  console.log('[EmailService] hasClickLinks:', hasClickLinks);
+
+  const rewrittenHtml = hasClickLinks
+    ? inputHtml
+    : rewriteHtmlForTracking(inputHtml, { campaignId, recipientId });
+
+  // Always embed the open pixel with THIS email_log's tracking_id. Any stale
+  // pixel left over from a reused draft/template is stripped first so the email
+  // can never point at another recipient's (or another campaign's) email_log.
+  const trackedHtml = appendTrackingPixel(
+    rewrittenHtml.replace(
+      /<img[^>]*\bsrc\s*=\s*["']?[^"'\s>]*\/api\/tracking\/open\/[^"'\s>]*["']?[^>]*>/gi,
+      ''
+    ),
+    { trackingId, baseUrl: trackingConfig.baseUrl }
+  );
+
+  console.log('[EmailService] FINAL HTML:', trackedHtml);
+
+  // Wrap the body in a full standards-compliant document (valid <html><head>
+  // <body> + <!DOCTYPE>) so clients render it consistently. First the saved
+  // template HTML is normalized to a Gmail-safe, centered 600px layout. The
+  // tracking pixel is already inside the body.
+  const docHtml = wrapHtmlDocument(toEmailSafeHtml(trackedHtml));
+
+  // Always include a plain-text part so the MIME structure is a proper
+  // multipart/alternative (text/plain + text/html) — required by major
+  // providers for good deliverability.
+  const textPart = text && String(text).trim() ? String(text) : stripHtml(trackedHtml);
+
+  const info = await getTransporter().sendMail({
+    from: emailConfig.from,
+    to,
+    replyTo: emailConfig.replyTo || undefined,
+    subject,
+    html: docHtml,
+    text: textPart,
+    messageId: buildMessageId(),
+    list: emailConfig.listUnsubscribe ? { unsubscribe: emailConfig.listUnsubscribe } : undefined,
+    attachments,
+  });
+  return { success: true, messageId: info.messageId, response: info.response };
+}
+
+/**
+ * Send the same email to multiple recipients individually.
+ *
+ * Each address receives its own message so recipients cannot see each other.
+ * Failures are collected — one bad address does not abort the rest.
+ *
+ * @param {object} options
+ * @param {string[]} options.recipients - Array of email addresses.
+ * @param {string}   options.subject    - Email subject line.
+ * @param {string}   options.html       - HTML body.
+ * @param {string}   [options.text]     - Optional plain-text body.
+ * @returns {Promise<Array<{email: string, success: boolean, messageId?: string, error?: string}>>}
+ */
+async function sendBulkEmail({ recipients, subject, html, text }) {
+  const results = [];
+  for (const email of recipients) {
+    try {
+      const result = await sendEmail({ to: email, subject, html, text });
+      results.push({ email, ...result });
+    } catch (error) {
+      results.push({ email, success: false, error: error.message });
+    }
+  }
+  return results;
+}
+
+export { sendEmail, sendBulkEmail, verifyConnection, getTransporter, rewriteHtmlForTracking };
