@@ -5,6 +5,7 @@ export const SEED_CAMPAIGNS: any[] = [];
 export const NAV_META: { [key: string]: { title: string; sub: string } } = {
   dashboard:  { title: 'Dashboard',             sub: 'Overview · IUOVA Email Intelligence' },
   contacts:   { title: 'Contacts',              sub: 'Manage and enrich your contact database' },
+  'contact-types': { title: 'Contact Types',    sub: 'Create, rename and organize your contact segments' },
   campaigns:  { title: 'Campaigns',             sub: 'Build, schedule and send email campaigns' },
   followups:  { title: 'Follow-ups',            sub: 'Follow-ups go only to recipients who opened' },
   sequences:  { title: 'Sequences',             sub: 'Email drip automation' },

@@ -26,7 +26,7 @@ function mapRowToContact(row: ContactRow): Contact {
     designation: row.designation || '',
     industry: row.industry || '',
     city: row.city || '',
-    type: row.contact_type || 'New Lead',
+    type: row.contact_type || '',
     category: row.company_category || 'OEM',
     notes: row.notes || '',
     lastContacted: '',
@@ -214,6 +214,125 @@ export async function createContactType(
     }
   } catch (err) {
     return { data: null, error: err instanceof Error ? err.message : 'Failed to create contact type' }
+  }
+}
+
+/** Fetch the active contact types (segments) from the existing `contact_types`
+ *  table. Single source of truth shared by the Contacts tabs and the Contact
+ *  Types management page. */
+export async function fetchContactTypes(): Promise<{
+  data: { id: string; name: string }[];
+  error: string | null;
+}> {
+  try {
+    const { data, error } = await supabase
+      .from('contact_types')
+      .select('id, name, is_active')
+      .eq('is_active', true)
+      .order('name');
+    if (error) return { data: [], error: error.message };
+    const rows = (data as { id: any; name: string }[]).map((r) => ({
+      id: String(r.id),
+      name: r.name,
+    }));
+    return { data: rows, error: null };
+  } catch (err) {
+    return { data: [], error: err instanceof Error ? err.message : 'Failed to load contact types' };
+  }
+}
+
+/** Rename a contact type and keep its contacts assigned.
+ *  The relationship is the denormalized `contacts.contact_type` TEXT column, so
+ *  after renaming the row we also update every contact that referenced the old
+ *  name — the tab/filter on the Contacts page must reflect the new name. */
+export async function renameContactType(
+  id: string,
+  oldName: string,
+  newName: string
+): Promise<{ data: { id: string; name: string } | null; error: string | null }> {
+  try {
+    const trimmed = newName.trim();
+    if (!trimmed) return { data: null, error: 'Name is required' };
+
+    const { data, error } = await supabase
+      .from('contact_types')
+      .update({ name: trimmed })
+      .eq('id', id)
+      .select('id, name')
+      .single();
+
+    if (error) return { data: null, error: error.message };
+
+    // Keep the denormalized relationship in sync (no FK exists between the two
+    // tables, so we must update the contact rows by the old name).
+    if (oldName && oldName !== trimmed) {
+      const { error: updErr } = await supabase
+        .from('contacts')
+        .update({ contact_type: trimmed })
+        .eq('contact_type', oldName);
+      if (updErr) {
+        // Roll back the rename so the two stay consistent.
+        await supabase.from('contact_types').update({ name: oldName }).eq('id', id);
+        return { data: null, error: updErr.message };
+      }
+    }
+
+    const row = data as { id: any; name: string };
+    return { data: { id: String(row.id), name: row.name }, error: null };
+  } catch (err) {
+    return { data: null, error: err instanceof Error ? err.message : 'Failed to rename contact type' };
+  }
+}
+
+/** Delete a contact type.
+ *  CRITICAL: this NEVER deletes contacts. It removes the `contact_types` row and
+ *  clears the `contact_type` assignment (set to NULL) on any contacts that
+ *  referenced it. The contacts themselves remain in the `contacts` table and
+ *  continue to appear under "All Contacts". There is no FK / cascade that could
+ *  touch the contacts table. */
+export async function deleteContactType(
+  id: string,
+  name: string
+): Promise<{ error: string | null }> {
+  try {
+    // 1) Unassign contacts first. If this fails we must not delete the type.
+    const { error: unassignErr } = await supabase
+      .from('contacts')
+      .update({ contact_type: null })
+      .eq('contact_type', name);
+    if (unassignErr) {
+      return { error: unassignErr.message };
+    }
+
+    // 2) Remove the type record itself.
+    const { error } = await supabase.from('contact_types').delete().eq('id', id);
+    if (error) return { error: error.message };
+
+    return { error: null };
+  } catch (err) {
+    return { error: err instanceof Error ? err.message : 'Failed to delete contact type' };
+  }
+}
+
+/** Count contacts per contact type.
+ *  Relationship = `contacts.contact_type` (TEXT) matching `contact_types.name`.
+ *  Returns a map of name → count. Contacts with NULL type are not counted under
+ *  any type (they live only under "All Contacts"). */
+export async function fetchContactTypeCounts(): Promise<{
+  data: Record<string, number>;
+  error: string | null;
+}> {
+  try {
+    const { data, error } = await supabase.from('contacts').select('contact_type');
+    if (error) return { data: {}, error: error.message };
+    const counts: Record<string, number> = {};
+    for (const row of data as { contact_type: string | null }[]) {
+      const t = row.contact_type;
+      if (t) counts[t] = (counts[t] || 0) + 1;
+    }
+    return { data: counts, error: null };
+  } catch (err) {
+    return { data: {}, error: err instanceof Error ? err.message : 'Failed to load contact counts' };
   }
 }
 

@@ -278,6 +278,14 @@ export default function ContactsTab({
   const [cSearchVal, setCSearchVal] = useState('');
   const [selectedIds, setSelectedIds] = useState<Set<any>>(new Set());
 
+  // ─── DRAG & DROP: assign contacts to a list ───
+  // `dragIds` holds the contact ids currently being dragged (used for the
+  // "dragging" visual cue and as a fallback payload source). `dropTargetList`
+  // holds the name of the list tab currently hovered during a drag so it can
+  // be highlighted as a valid drop target.
+  const [dragIds, setDragIds] = useState<Set<string>>(new Set());
+  const [dropTargetList, setDropTargetList] = useState<string | null>(null);
+
   // ─── ADD/EDIT FORM STATE ───
   const [isContactModalOpen, setIsContactModalOpen] = useState(false);
   const [editingId, setEditingId] = useState<any | null>(null);
@@ -437,6 +445,17 @@ export default function ContactsTab({
     return { total, activeProfiles, newLeads, unqualified, highEngagement, enriched, verifiedMeta };
   }, [contacts]);
 
+  // Per-list contact counts (derived from the existing contact_type field) so
+  // each tab shows a live count that updates immediately after a drop.
+  const typeCounts = useMemo(() => {
+    const counts: Record<string, number> = {};
+    for (const c of contacts) {
+      const t = c.type || 'New Lead';
+      counts[t] = (counts[t] || 0) + 1;
+    }
+    return counts;
+  }, [contacts]);
+
   // ─── CONTACTS FILTERING & SORTING ───
   const filteredContacts = useMemo(() => {
     const base = contacts;
@@ -506,6 +525,142 @@ export default function ContactsTab({
     } else {
       setSelectedIds(new Set());
     }
+  };
+
+  // ─── DRAG & DROP HANDLERS ───
+  // The drag payload is always an ARRAY of contact ids so the same code path
+  // supports both single-contact drag and multi-contact drag (selected rows).
+  const DRAG_MIME = 'application/x-contact-ids';
+
+  const handleRowDragStart = (e: React.DragEvent, c: Contact) => {
+    // If the dragged row is part of the current multi-selection, drag the whole
+    // selection; otherwise drag just this one contact.
+    const ids: string[] =
+      selectedIds.has(c.id) && selectedIds.size > 0
+        ? Array.from(selectedIds).map(String)
+        : [String(c.id)];
+
+    setDragIds(new Set(ids));
+    e.dataTransfer.effectAllowed = 'move';
+    e.dataTransfer.setData(DRAG_MIME, JSON.stringify(ids));
+    // Fallback for browsers that discard custom MIME types.
+    e.dataTransfer.setData('text/plain', ids.join(','));
+  };
+
+  const handleRowDragEnd = () => {
+    setDragIds(new Set());
+    setDropTargetList(null);
+  };
+
+  // Read the dragged contact ids from a drop event (with fallbacks).
+  const readDraggedIds = (e: React.DragEvent): string[] => {
+    const raw = e.dataTransfer.getData(DRAG_MIME);
+    if (raw) {
+      try {
+        const parsed = JSON.parse(raw);
+        if (Array.isArray(parsed) && parsed.length) return parsed.map(String);
+      } catch {
+        /* ignore */
+      }
+    }
+    const plain = e.dataTransfer.getData('text/plain');
+    if (plain) {
+      const fromPlain = plain.split(',').map(s => s.trim()).filter(Boolean);
+      if (fromPlain.length) return fromPlain;
+    }
+    return Array.from(dragIds).map(String);
+  };
+
+  const handleTabDragOver = (e: React.DragEvent, listName: string) => {
+    if (listName === 'all') {
+      // "All Contacts" is the master collection — never a drop target.
+      setDropTargetList(null);
+      return;
+    }
+    e.preventDefault();
+    e.dataTransfer.dropEffect = 'move';
+    if (dropTargetList !== listName) setDropTargetList(listName);
+  };
+
+  const handleTabDragLeave = (e: React.DragEvent, listName: string) => {
+    if (listName === 'all') return;
+    // Only clear when the pointer actually leaves the tab (not when moving onto
+    // a child element inside the tab button).
+    if (!e.currentTarget.contains(e.relatedTarget as Node | null)) {
+      setDropTargetList(prev => (prev === listName ? null : prev));
+    }
+  };
+
+  const handleTabDrop = async (e: React.DragEvent, listName: string) => {
+    if (listName === 'all') return;
+    e.preventDefault();
+    setDropTargetList(null);
+
+    const ids = readDraggedIds(e);
+    if (!ids.length) {
+      setDragIds(new Set());
+      return;
+    }
+
+    const targets = contacts.filter(c => ids.includes(String(c.id)));
+    if (targets.length === 0) {
+      setDragIds(new Set());
+      return;
+    }
+
+    // Requirement: never create a duplicate relationship. A contact already in
+    // this list (contact_type === listName) is skipped.
+    const toUpdate = targets.filter(c => c.type !== listName);
+    if (toUpdate.length === 0) {
+      onToast(
+        targets.length === 1
+          ? `${targets[0].name} is already in ${listName}`
+          : `${targets.length} contacts are already in ${listName}`,
+        'info'
+      );
+      setDragIds(new Set());
+      return;
+    }
+
+    // Persist using the EXISTING contact_type relationship — no new table.
+    const updates = toUpdate.map(c => {
+      const input: ContactInput = {
+        full_name: c.name,
+        email: c.email,
+        company: c.company,
+        designation: c.designation || null,
+        industry: c.industry || null,
+        city: c.city || null,
+        contact_type: listName,
+        company_category: c.category || 'OEM',
+        notes: c.notes || null,
+      };
+      return updateContact(String(c.id), input);
+    });
+
+    const results = await Promise.all(updates);
+    const firstError = results.find(r => r.error);
+    if (firstError) {
+      // Leave existing data unchanged on failure.
+      onToast('Failed to add to list: ' + firstError.error, 'error');
+      setDragIds(new Set());
+      return;
+    }
+
+    // Update the UI immediately — no page refresh.
+    const updated = contacts.map(c =>
+      toUpdate.some(u => String(u.id) === String(c.id)) ? { ...c, type: listName } : c
+    );
+    setContacts(updated);
+    onPersistContacts(updated);
+
+    onToast(
+      toUpdate.length === 1
+        ? `${toUpdate[0].name} added to ${listName}`
+        : `${toUpdate.length} contacts added to ${listName}`,
+      'success'
+    );
+    setDragIds(new Set());
   };
 
   // ─── ROW ACTIONS ───
@@ -864,18 +1019,30 @@ export default function ContactsTab({
             because `typeTabs` is derived from `contactTypes`, which is updated
             by handleCreateList. */}
         <div className="ct-tabs">
-          {typeTabs.map(tab => (
-            <button
-              key={tab.id}
-              className={`ct-tab ${cTypeFilter === tab.id ? 'active' : ''}`}
-              onClick={() => { setCTypeFilter(tab.id); setCPage(1); }}
-            >
-              {tab.label}
-            </button>
-          ))}
+          {typeTabs.map(tab => {
+            const isAll = tab.id === 'all';
+            const isDropActive = dropTargetList === tab.id;
+            const tabCount = isAll ? metrics.total : typeCounts[tab.id] || 0;
+            return (
+              <button
+                key={tab.id}
+                className={`ct-tab ${cTypeFilter === tab.id ? 'active' : ''} ${isDropActive ? 'drop-active' : ''}`}
+                onClick={() => { setCTypeFilter(tab.id); setCPage(1); }}
+                onDragOver={(e) => handleTabDragOver(e, tab.id)}
+                onDragLeave={(e) => handleTabDragLeave(e, tab.id)}
+                onDrop={(e) => handleTabDrop(e, tab.id)}
+                title={isAll ? 'All Contacts (master list — not a drop target)' : `Drop contacts here to add them to ${tab.label}`}
+              >
+                <span>{tab.label}</span>
+                <span className="ct-tab-count">{tabCount}</span>
+                {isDropActive && <span className="ct-tab-drop-hint">Drop here</span>}
+              </button>
+            );
+          })}
           <button
             className="ct-tab ct-tab-create"
             onClick={() => setIsCreateListOpen(true)}
+            title="Create a new list"
           >
             <PlusIcon size={14} /> Create List
           </button>
@@ -943,6 +1110,10 @@ export default function ContactsTab({
                   return (
                     <tr
                       key={c.id}
+                      draggable
+                      onDragStart={(e) => handleRowDragStart(e, c)}
+                      onDragEnd={handleRowDragEnd}
+                      className={`ct-row ${dragIds.has(String(c.id)) ? 'dragging' : ''}`}
                       style={selectedIds.has(c.id) ? { background: 'var(--accent-light)' } : undefined}
                     >
                       <td>

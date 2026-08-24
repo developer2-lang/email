@@ -4,7 +4,7 @@ import type { TabKey } from '../types'
 
 const NAV_SECTIONS: { label: string; tabs: TabKey[] }[] = [
   { label: 'Overview', tabs: ['dashboard', 'analytics'] },
-  { label: 'Outreach', tabs: ['contacts', 'campaigns', 'followups'] },
+  { label: 'Outreach', tabs: ['contacts', 'contact-types', 'campaigns', 'followups'] },
   { label: 'Templates', tabs: ['template-editor', 'template-library'] },
   { label: 'Automation', tabs: ['sequences', 'sequence-builder'] },
   { label: 'Settings', tabs: ['settings'] },
@@ -41,6 +41,12 @@ const NAV_ICONS: Record<TabKey, ReactNode> = {
       <circle cx="9" cy="7" r="4" />
       <path d="M22 21v-2a4 4 0 0 0-3-3.87" />
       <path d="M16 3.13a4 4 0 0 1 0 7.75" />
+    </>
+  ),
+  'contact-types': (
+    <>
+      <path d="M20.59 13.41 13.42 20.59a2 2 0 0 1-2.83 0L2 12V2h10l8.59 8.59a2 2 0 0 1 0 2.82Z" />
+      <line x1="7" y1="7" x2="7.01" y2="7" />
     </>
   ),
   campaigns: (

@@ -4,6 +4,7 @@ import type { ActivityItem, EngagedContact } from '../services/dashboardService'
 import AnalyticsTab from '../pages/AnalyticsTab'
 import CampaignsTab from '../pages/CampaignsTab'
 import ContactsTab from '../pages/ContactsTab'
+import ContactTypesTab from '../pages/ContactTypesTab'
 import DashboardTab from '../pages/DashboardTab'
 import FollowupsTab from '../pages/FollowupsTab'
 import SequenceBuilderTab from '../pages/SequenceBuilderTab'
@@ -81,6 +82,9 @@ export default function AppRoutes(props: AppRoutesProps) {
           onQueueSelectedContacts={props.onQueueSelectedContacts}
         />
       )
+
+    case 'contact-types':
+      return <ContactTypesTab onToast={props.onToast} />
 
     case 'campaigns':
       return (

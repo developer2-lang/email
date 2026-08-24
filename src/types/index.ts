@@ -1,6 +1,7 @@
 export type TabKey =
   | 'dashboard'
   | 'contacts'
+  | 'contact-types'
   | 'campaigns'
   | 'followups'
   | 'sequences'
