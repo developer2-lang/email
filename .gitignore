@@ -7,6 +7,3 @@ npm-debug.log*
 yarn-error.log*
 
 # Environment variables (never commit real secrets)
-.env
-.env.*
-!.env.example
