@@ -16,7 +16,7 @@
 
 // IST (Asia/Kolkata) = UTC+05:30. Mirrors the offset used by the schedulers so
 // the next-batch wall-clock time is computed the same way everywhere.
-import type { SupabaseClient } from 'npm:@supabase/supabase-js@2';
+
 
 const IST_OFFSET_MS = (5 * 60 + 30) * 60 * 1000;
 
