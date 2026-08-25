@@ -17,7 +17,7 @@
   ],
   "license": "MIT",
   "engines": {
-    "node": ">=24.18.0"
+    "node": "24.x"
   },
   "dependencies": {
     "@supabase/supabase-js": "^2.111.0",
