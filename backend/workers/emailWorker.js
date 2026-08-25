@@ -22,10 +22,12 @@ import * as supabaseService from '../services/supabaseService.js';
 import trackingConfig from '../config/tracking.js';
 import trackingEdge from '../config/trackingEdge.js';
 
-const BATCH_SIZE = Math.max(1, parseInt(process.env.BATCH_SIZE, 10) || 10);
+const BATCH_SIZE = 1;
 const EMAIL_DELAY_MS = Math.max(0, parseInt(process.env.EMAIL_DELAY_MS, 10) || 1000);
 const BATCH_DELAY_MS = Math.max(0, parseInt(process.env.BATCH_DELAY_MS, 10) || 5000);
 const RETRY_DELAYS = [30, 60, 120]; // seconds after attempt 1, 2, 3
+
+const BATCH_INTERVAL_MINUTES = 60;
 
 // Campaign ids currently being processed — prevents duplicate workers.
 const _processing = new Set();
@@ -399,6 +401,159 @@ function classifySmtpResult(error) {
 }
 
 /**
+ * Process one recipient in batch mode.
+ * Sends exactly ONE recipient, increments progress, and sets next_batch_at.
+ * This function MUST finish quickly and NOT wait for the interval.
+ *
+ * @param {object} campaign - The campaign object from Supabase
+ * @param {Array} contacts - Eligible recipient contacts
+ * @param {number} batchSize - Batch size (always 1 for this mode)
+ * @param {number} batchIntervalMinutes - Minutes to wait before next batch
+ * @returns {Promise<{sent: number, failed: number, total: number, completed: boolean}>}
+ */
+async function processBatchMode(campaign, contacts, batchSize, batchIntervalMinutes) {
+  // ─── 1. Duplicate protection: check next_batch_at ────────────────────────
+  const now = Date.now();
+  if (campaign.next_batch_at) {
+    const dueDate = new Date(campaign.next_batch_at).getTime();
+    if (now < dueDate) {
+      // Not due yet – exit without sending anything
+      console.log(
+        `[BatchMode] Campaign ${campaign.id} not due yet (next at ${new Date(
+          dueDate
+        ).toISOString()}) – skipping`
+      );
+      return { sent: 0, failed: 0, total: 0, completed: false };
+    }
+  }
+
+  // ─── 2. Get already-sent contacts for this campaign ─────────────────────
+  const existingLogs = await emailLogService.getLogsByCampaign(campaign.id);
+  const sentContactIds = new Set(
+    existingLogs
+      .filter((l) => l.status === 'sent')
+      .map((l) => l.contact_id)
+  );
+
+  // ─── 3. Filter out already-sent contacts ────────────────────────────────
+  const remainingContacts = contacts.filter((c) => !sentContactIds.has(c.id));
+
+  // ─── 4. If no remaining contacts, mark campaign complete ────────────────
+  if (remainingContacts.length === 0) {
+    console.log(
+      `[BatchMode] No eligible contacts for campaign ${campaign.id}`
+    );
+    await supabaseService.updateCampaignStatus(campaign.id, {
+      status: 'sent',
+      recipient_count: contacts.length,
+    });
+    await supabaseService.supabase
+      .from('campaigns')
+      .update({ next_batch_at: null })
+      .eq('id', campaign.id);
+    return { sent: 0, failed: 0, total: 0, completed: true };
+  }
+
+  // ─── 5. Select ONLY ONE remaining recipient ─────────────────────────────
+  // Always pick the first remaining contact (deterministic order)
+  const recipient = remainingContacts[0];
+  console.log(
+    `[BatchMode] Sending to recipient: ${recipient.email}`
+  );
+
+  // ─── 6. Create email_log entry for this recipient ───────────────────────
+  await emailLogService.createEmailLogs([
+    {
+      campaign_id: campaign.id,
+      contact_id: recipient.id,
+      email: recipient.email,
+      status: 'pending',
+    },
+  ]);
+
+  // Get the pending log for this recipient
+  const pendingLogs = await emailLogService.getPendingEmailLogs(campaign.id, 1);
+  const logToSend =
+    pendingLogs.find((l) => l.contact_id === recipient.id) || pendingLogs[0];
+
+  if (!logToSend) {
+    console.error(
+      `[BatchMode] No email log found for contact ${recipient.id} in campaign ${campaign.id}`
+    );
+    return { sent: 0, failed: 1, total: 1, completed: false };
+  }
+
+  try {
+    await sendOneEmail(logToSend, campaign, new Map([[recipient.id, recipient]]), 1, 1);
+    console.log(
+      `[BatchMode] ✓ Successfully sent to ${recipient.email}`
+    );
+
+    // ─── 7. Update progress: increment current_batch_number ────────────────
+    await supabaseService.updateCampaignStatus(campaign.id, {
+      current_batch_number: Number(campaign.current_batch_number || 0) + 1,
+    });
+
+    // ─── 8. Schedule next batch: set next_batch_at = now + 1 hour ─────────
+    const nextBatchAt = new Date(
+      Date.now() + BATCH_INTERVAL_MINUTES * 60 * 1000
+    ).toISOString();
+    await supabaseService.supabase
+      .from('campaigns')
+      .update({ next_batch_at: nextBatchAt })
+      .eq('id', campaign.id);
+    console.log(
+      `[BatchMode] next_batch_at set to ${nextBatchAt}`
+    );
+
+    // Check if this was the last remaining recipient
+    const nextRemaining = contacts.filter(
+      (c) => !sentContactIds.has(c.id) && c.id !== recipient.id
+    );
+    const completed = nextRemaining.length === 0;
+
+    // If all sent, immediately mark campaign as sent
+    if (completed) {
+      await supabaseService.updateCampaignStatus(campaign.id, {
+        status: 'sent',
+        recipient_count: contacts.length,
+      });
+      await supabaseService.supabase
+        .from('campaigns')
+        .update({ next_batch_at: null })
+        .eq('id', campaign.id);
+      console.log(
+        `[BatchMode] Campaign ${campaign.id} completed – all ${contacts.length} sent`
+      );
+      return {
+        sent: 1,
+        failed: 0,
+        total: 1,
+        completed: true,
+      };
+    }
+
+    return {
+      sent: 1,
+      failed: 0,
+      total: 1,
+      completed: false,
+    };
+  } catch (error) {
+    console.error(
+      `[BatchMode] ✗ Failed to send to ${recipient.email}: ${error.message}`
+    );
+    // Do NOT increment progress on failure – retry same recipient next time
+    return {
+      sent: 0,
+      failed: 1,
+      total: 1,
+      completed: false,
+    };
+  }
+}
+
+/**
  * Process the email queue for a single campaign until no pending emails remain.
  *
  * @param {string} campaignId
@@ -514,8 +669,21 @@ async function processCampaign(campaignId) {
       }
     }
 
-    // Step 5: Process queue in batches.
-    console.log(`[Worker] STEP 5: Processing email queue...`);
+// Step 5: Process ONE recipient per invocation (hardcoded batch mode).
+    // Every non-sequence campaign sends exactly 1 email per batch, then sets
+    // next_batch_at = now + 60 minutes so the scheduler re-invokes this worker
+    // after the interval. Sequences keep their own per-step flow and are not
+    // affected.
+    const isSequenceCampaign = campaign.campaign_type === 'sequence';
+    console.log(`[Worker] STEP 5: Processing email queue (batch mode: ${!isSequenceCampaign})`);
+
+    if (!isSequenceCampaign) {
+      const result = await processBatchMode(campaign, contacts, BATCH_SIZE, BATCH_INTERVAL_MINUTES);
+      return result;
+    }
+
+    // Sequence fallback: send ALL pending emails (sequences manage their own
+    // step-by-step flow externally and only use this path for direct sends).
     let batchNum = 0;
     let totalSent = 0;
     let totalFailed = 0;
@@ -532,8 +700,6 @@ async function processCampaign(campaignId) {
 
       for (let i = 0; i < pending.length; i++) {
         const log = pending[i];
-        // Pace each message ~1/sec so Gmail's SMTP rate limit is never hit
-        // (bursts of fast sends trigger "421 Try again later" + Spam placement).
         if (i > 0 && EMAIL_DELAY_MS > 0) {
           await new Promise((resolve) => setTimeout(resolve, EMAIL_DELAY_MS));
         }
@@ -546,16 +712,10 @@ async function processCampaign(campaignId) {
           });
           totalSent++;
           console.log(`[Worker] STEP 5: ✓ Sent to ${log.email} (${totalSent} sent total)`);
-          console.log(
-            `[Worker] STEP 5: SMTP audit — recipient=${log.email} log_id=${log.id} tracking_id=${log.tracking_id} ` +
-            `attempt=${emailNumber}/${contacts.length} result=SMTP_ACCEPTED final_status=sent ` +
-            `messageId=${result.messageId} response=${String(result.response || '').replace(/\s+/g, ' ').trim()}`
-          );
         } catch (error) {
           const smtpResult = classifySmtpResult(error);
           console.error(`[Worker] STEP 5: ✗ FAILED to send to ${log.email}`);
           console.error(`[Worker] Error message: ${error.message}`);
-          console.error(`[Worker] Error stack: ${error.stack}`);
 
           const retryCount = (log.retry_count || 0) + 1;
 
@@ -568,11 +728,6 @@ async function processCampaign(campaignId) {
               last_attempt_at: new Date().toISOString(),
             });
             totalFailed++;
-            console.log(
-              `[Worker] STEP 5: SMTP audit — recipient=${log.email} log_id=${log.id} tracking_id=${log.tracking_id} ` +
-              `attempt=${emailNumber}/${contacts.length} result=${smtpResult} final_status=failed ` +
-              `error=${String(error.message).replace(/\s+/g, ' ').trim()}`
-            );
           } else {
             const delaySec = RETRY_DELAYS[retryCount - 1];
             console.log(`[Worker] STEP 5: Scheduling retry ${retryCount} for ${log.email} in ${delaySec}s`);
@@ -586,7 +741,6 @@ async function processCampaign(campaignId) {
         }
       }
 
-      // Wait between batches (skip delay on the final batch).
       if (pending.length === BATCH_SIZE) {
         console.log(`[Worker] STEP 5: Waiting ${BATCH_DELAY_MS}ms before next batch...`);
         await new Promise((resolve) => setTimeout(resolve, BATCH_DELAY_MS));

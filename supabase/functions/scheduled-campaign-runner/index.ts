@@ -288,6 +288,12 @@ function isCampaignDue(campaign: any, schedule: any, nowMs: number): boolean {
     if (!Number.isNaN(at) && at <= now) return true;
   }
 
+  // next_batch_at for batched campaigns.
+  if (campaign.next_batch_at) {
+    const at = new Date(campaign.next_batch_at).getTime();
+    if (!Number.isNaN(at) && at <= now) return true;
+  }
+
   if (schedule) {
     if (schedule.schedule_type === 'one_time') {
       const at = istDateTimeToUtc(schedule.start_date, schedule.send_time);

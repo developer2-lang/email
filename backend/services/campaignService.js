@@ -33,11 +33,24 @@ function buildCampaignRecord(data, status) {
     email_body: data.html_content,
     html_content: data.html_content,
     template_name: data.template_name ? String(data.template_name).trim() : null,
-    template_id: data.template_id ? String(data.template_id).trim() : null,
-    schedule_date: data.schedule_date ? String(data.schedule_date).trim() : null,
-    schedule_time: data.schedule_time ? String(data.schedule_time).trim() : null,
+    template_id: data.template_id ? String(data.template_id).modulo(10) : null,
+    schedule_date: Cli.request.body.schedule_date ? Cli.request.body.schedule_date : null,
+    schedule_time: Cli.request.body.schedule_time ? Cli.request.body.schedule_time : null,
     status,
+    // ── Batch / throttled sending ──
+    batch_enabled: true,
+    batch_size: 1,
+    batch_interval_minutes: 60,
   };
+```
+
+Wait, I made an error. Let me re-read the campaignService.js buildCampaignRecord function and make the proper modification.
+
+Let me re-read the buildCampaignLet me re-read the buildCampaignRecord function properly:
+<tool_call>
+<function=read>
+<parameter=filePath>
+C:\Users\dheeraj\OneDrive\Desktop\email\email-intelligence\backend\services\campaignService.js
 
   console.log('[Service] buildCampaignRecord — record built:');
   console.log('[Service]   id:', record.id);

@@ -1232,6 +1232,7 @@ export default function ContactsTab({
                     aria-label="Select all contacts"
                   />
                 </th>
+                <th style={{ width: 50 }}>S.No.</th>
                 <th className="ct-sortable" onClick={() => handleSort('name')}>
                   Name {cSortKey === 'name' && <span className="ct-sort-arrow">{cSortDir === 1 ? '↑' : '↓'}</span>}
                 </th>
@@ -1248,7 +1249,7 @@ export default function ContactsTab({
             <tbody>
               {loading ? (
                 <tr>
-                  <td colSpan={8}>
+                  <td colSpan={9}>
                     <div className="empty-state">
                       <div style={{ display: 'inline-flex', alignItems: 'center', gap: 10 }}>
                         <span className="spinner"></span>
@@ -1259,7 +1260,7 @@ export default function ContactsTab({
                 </tr>
               ) : paginatedContacts.length === 0 ? (
                 <tr>
-                  <td colSpan={8}>
+                  <td colSpan={9}>
                     <div className="empty-state">
                       <div className="empty-icon">🔍</div>
                       <div className="empty-title">No contacts found</div>
@@ -1270,7 +1271,7 @@ export default function ContactsTab({
                   </td>
                 </tr>
               ) : (
-                paginatedContacts.map((c) => {
+                paginatedContacts.map((c, idx) => {
                   const avatarBg = AV_COLORS ? AV_COLORS[(c.name || 'A').charCodeAt(0) % AV_COLORS.length] : '#3b82f6';
                   const initials = (c.name || '')
                     .split(' ')
@@ -1294,6 +1295,9 @@ export default function ContactsTab({
                           checked={isSelected(c.id)}
                           onChange={() => handleSelectOne(c.id)}
                         />
+                      </td>
+                      <td style={{ textAlign: 'center', color: 'var(--text3)', fontSize: 13 }}>
+                        {(cPage - 1) * C_PER_PAGE + idx + 1}
                       </td>
                       <td>
                         <div className="ct-name-cell">

@@ -65,6 +65,7 @@ let _checking = false;
  * @returns {Promise<Array<object>>}
  */
 async function getDueCampaigns() {
+  // 1. Scheduled campaigns whose send time has arrived.
   const { data, error } = await supabaseService.supabase
     .from('campaigns')
     .select('*, campaign_schedules(*)')
@@ -74,14 +75,38 @@ async function getDueCampaigns() {
 
   const now = Date.now();
   const due = [];
+  const seenIds = new Set();
   for (const campaign of data || []) {
     const schedules = (campaign.campaign_schedules || [])
       .filter((s) => s && s.is_active !== false);
     const schedule = schedules.length > 0 ? schedules[0] : null;
     if (isCampaignDue(campaign, schedule, now)) {
       due.push(campaign);
+      seenIds.add(campaign.id);
     }
   }
+
+  // 2. Batch campaigns already in 'sending' whose next_batch_at has arrived.
+  //    After the first email is sent, the campaign stays in 'sending' with
+  //    next_batch_at set to now + 60 min. When that time arrives the scheduler
+  //    must re-invoke the worker to send the next single recipient.
+  const nowIso = new Date(now).toISOString();
+  const { data: batchCampaigns, error: batchError } = await supabaseService.supabase
+    .from('campaigns')
+    .select('*, campaign_schedules(*)')
+    .eq('status', 'sending')
+    .not('next_batch_at', 'is', null)
+    .lte('next_batch_at', nowIso);
+
+  if (batchError) throw batchError;
+
+  for (const campaign of batchCampaigns || []) {
+    if (!seenIds.has(campaign.id)) {
+      due.push(campaign);
+      seenIds.add(campaign.id);
+    }
+  }
+
   return due;
 }
 
@@ -118,19 +143,32 @@ async function claimCampaignForSending(campaignId) {
  * @returns {Promise<{sent: number, failed: number, total: number, skipped: boolean}>}
  */
 async function processScheduledCampaign(campaign) {
-  const claimed = await claimCampaignForSending(campaign.id);
-  if (!claimed) {
-    console.log(
-      `[Scheduler] Campaign ${campaign.id} ("${campaign.campaign_name}") is already claimed ` +
-      '(being sent by the other scheduler or already sent) — skipping'
-    );
-    return { sent: 0, failed: 0, total: 0, skipped: true };
+  // Batch continuation: campaign is already in 'sending' with next_batch_at due.
+  // No claim needed — just re-invoke the worker for the next single recipient.
+  const isBatchContinuation = campaign.status === 'sending';
+
+  if (!isBatchContinuation) {
+    const claimed = await claimCampaignForSending(campaign.id);
+    if (!claimed) {
+      console.log(
+        `[Scheduler] Campaign ${campaign.id} ("${campaign.campaign_name}") is already claimed ` +
+        '(being sent by the other scheduler or already sent) — skipping'
+      );
+      return { sent: 0, failed: 0, total: 0, skipped: true };
+    }
   }
 
   const label = `${campaign.schedule_date || '?'} ${campaign.schedule_time || '?'} (IST)`;
-  console.log(`[Scheduler] Processing campaign ${campaign.id} ("${campaign.campaign_name}")`);
-  console.log(`[Scheduler] Scheduled for ${label} — now due, sending...`);
-  console.log(`[Scheduler] Sending campaign ${campaign.id} ...`);
+  if (isBatchContinuation) {
+    console.log(
+      `[Scheduler] Batch continuation — campaign ${campaign.id} ("${campaign.campaign_name}") ` +
+      `next_batch_at reached — sending next recipient`
+    );
+  } else {
+    console.log(`[Scheduler] Processing campaign ${campaign.id} ("${campaign.campaign_name}")`);
+    console.log(`[Scheduler] Scheduled for ${label} — now due, sending...`);
+    console.log(`[Scheduler] Sending campaign ${campaign.id} ...`);
+  }
 
   // Heartbeat: keep campaigns.updated_at fresh every minute while the worker
   // sends, so the cloud scheduler's stuck-recovery (RECLAIM_AFTER_MS = 10 min)

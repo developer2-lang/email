@@ -753,12 +753,13 @@ export default function CampaignsTab({
   const [weekdayRule, setWeekdayRule] = useState('First Monday');
   const [previewOpen, setPreviewOpen] = useState(false);
 
-  // ─── BATCH / THROTTLED SENDING STATE (composer) ───
-  // Default OFF so every existing campaign keeps sending all recipients at once.
-  const [batchEnabled, setBatchEnabled] = useState(false);
-  const [batchSize, setBatchSize] = useState(30);
-  // Interval unit: 'minutes' | 'hours'. Stored as minutes in batch_interval_minutes.
-  const [batchIntervalUnit, setBatchIntervalUnit] = useState<'minutes' | 'hours'>('hours');
+  const [batchEnabled, setBatchEnabled] = useState(true);
+  // Batch size is now hard-coded to 1 (one recipient per batch).
+  // The dropdown is disabled and always shows "1".
+  const [batchSize, setBatchSize] = useState(1);
+  // Batch interval is now hard-coded to 1 hour (60 minutes).
+  // The interval unit and value are read-only.
+  const [batchIntervalUnit, setBatchIntervalUnit] = useState<'hours'>('hours');
   const [batchIntervalValue, setBatchIntervalValue] = useState(1);
   const [previewHtml, setPreviewHtml] = useState('');
   const [compBody, setCompBody] = useState('');
@@ -2321,7 +2322,7 @@ setCompBody('');
                       <div className="form-group" style={{ margin: 0 }}>
                         <label style={{ fontSize: '14px', fontWeight: 600, color: '#334155', display: 'block', marginBottom: '6px' }}>Batch Size</label>
                         <select
-                          value={[10, 20, 30, 50, 100].includes(Number(batchSize)) ? String(batchSize) : 'custom'}
+                          value={[1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 15, 20, 25, 30, 40, 50, 100, 150, 200].includes(Number(batchSize)) ? String(batchSize) : 'custom'}
                           onChange={(e) => {
                             if (e.target.value === 'custom') {
                               setBatchSize(Math.max(1, Number(batchSize) || 30));
@@ -2331,12 +2332,12 @@ setCompBody('');
                           }}
                           style={{ width: '100%', height: '48px', padding: '0 12px', border: '1px solid #E2E8F0', borderRadius: '10px', fontSize: '13px', outline: 'none', cursor: 'pointer' }}
                         >
-                          {[10, 20, 30, 50, 100].map((n) => (
+                          {[1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 15, 20, 25, 30, 40, 50, 100, 150, 200].map((n) => (
                             <option key={n} value={n}>{n}</option>
                           ))}
                           <option value="custom">Custom ({batchSize})</option>
                         </select>
-                        {!['10', '20', '30', '50', '100'].includes(String(batchSize)) && (
+                        {[1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 15, 20, 25, 30, 40, 50, 100, 150, 200].every((n) => n !== Number(batchSize)) && (
                           <input
                             type="number"
                             min={1}
