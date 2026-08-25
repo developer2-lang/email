@@ -1,5 +1,5 @@
 import { useState, useEffect, useCallback } from 'react';
-import { fetchContactTypes, createContactType, renameContactType, deleteContactType, fetchContactTypeCounts } from '../services/contactsService';
+import { fetchContactTypes, createContactType, renameContactType, deleteContactType, fetchContactTypeCounts, syncContactTypes } from '../services/contactsService';
 
 // Standardized icon components (match the Contacts page visual language).
 const iconProps = {
@@ -70,6 +70,11 @@ export default function ContactTypesTab({ onToast }: ContactTypesTabProps) {
   // ─── LOAD FROM SUPABASE ───
   const loadData = useCallback(async () => {
     setLoading(true);
+    // Synchronize distinct contacts.contact_type values into contact_types
+    // BEFORE reading the table, so every type actually present on a contact
+    // (including compound values like "Existing Client (Vatsal/ Shubham)") is
+    // shown. Missing values are inserted; nothing is removed or overwritten.
+    await syncContactTypes();
     const [typesRes, countsRes] = await Promise.all([
       fetchContactTypes(),
       fetchContactTypeCounts(),

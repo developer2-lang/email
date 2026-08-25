@@ -186,6 +186,67 @@ export async function upsertContactsByEmail(inputs: ContactInput[]): Promise<{
   }
 }
 
+// ─── Contact Types synchronization ──────────────────────────────────────────
+// Keep `contact_types` in sync with the distinct values actually present in
+// `contacts.contact_type`. This is one-directional (contacts are the source of
+// truth for the set of types) and append-only:
+//   - existing rows in `contact_types` are never modified or removed here
+//   - only MISSING distinct contact_type values are inserted
+//   - `contact_types.name` carries a UNIQUE constraint, so a duplicate can
+//     never be created even if this runs concurrently
+// The loop is bounded: read distinct types → read existing types → compute the
+// missing set → insert only the missing → stop. It never re-triggers itself.
+export async function syncContactTypes(): Promise<{ error: string | null }> {
+  try {
+    // 1) Distinct non-empty contact_type values from contacts.
+    const { data: rows, error: cErr } = await supabase
+      .from('contacts')
+      .select('contact_type');
+    if (cErr) return { error: cErr.message };
+
+    const distinct = new Set<string>();
+    for (const r of (rows as { contact_type: string | null }[]) || []) {
+      const t = r.contact_type;
+      // Ignore NULL, empty strings, and whitespace-only values.
+      if (t && t.trim().length > 0) distinct.add(t.trim());
+    }
+    if (distinct.size === 0) return { error: null };
+
+    // 2) Existing contact_types names (used to avoid re-inserting duplicates).
+    const { data: types, error: tErr } = await supabase
+      .from('contact_types')
+      .select('name');
+    if (tErr) return { error: tErr.message };
+
+    const known = new Set<string>();
+    for (const r of (types as { name: string | null }[]) || []) {
+      if (r.name != null) known.add(r.name.trim());
+    }
+
+    // 3) Compute the missing values (exact contact_type string is used as name).
+    const missing = Array.from(distinct).filter((v) => !known.has(v));
+    if (missing.length === 0) return { error: null };
+
+    // 4) Insert only the missing values. Duplicate errors (from the UNIQUE
+    //    constraint) are expected and ignored — they can occur if another
+    //    sync inserted the same value between our read and write.
+    for (const name of missing) {
+      const { error } = await supabase
+        .from('contact_types')
+        .insert({ name, is_active: true });
+      if (error && !/duplicate|unique/i.test(error.message)) {
+        return { error: error.message };
+      }
+    }
+
+    return { error: null };
+  } catch (err) {
+    return {
+      error: err instanceof Error ? err.message : 'Failed to sync contact types',
+    };
+  }
+}
+
 // ─── Contact Types (segments) ───────────────────────────────────────────────
 // A "list" in the UI is really a contact TYPE / segment. These live in the
 // existing `contact_types` table (columns: id, name, is_active, created_at).

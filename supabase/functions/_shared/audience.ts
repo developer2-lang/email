@@ -20,7 +20,20 @@
  *   "Existing Client (Vatsal/ Shubham)"
  *   "New Client - Inbound"
  *   "New Client - Outbound"
- * so segment rules match by *category prefix*, case-insensitively.
+ *   "New Lead"
+ *   "Test Client"
+ *
+ * The Audience Segment is DIRECTLY connected to `contacts.contact_type`.
+ * A selected segment ALWAYS resolves via an exact (case-insensitive, trimmed)
+ * match against `contacts.contact_type` first. This guarantees:
+ *
+ *   SELECT * FROM contacts WHERE contact_type = <selected segment>
+ *
+ * returns exactly the contacts that will be emailed — never the whole table,
+ * never a different category. A handful of generic labels ("New Clients",
+ * "Existing Clients Only", "New Leads") are still supported as a FALLBACK that
+ * matches by `contact_type` prefix, but `company_category` is NEVER used for
+ * audience filtering (per requirement).
  *
  * Guarantees (required by the acceptance criteria):
  *   1. The displayed segment count and the campaign's sent recipients use the
@@ -29,13 +42,7 @@
  *   3. Only contacts with a valid, deliverable email are returned.
  *   4. Duplicate email addresses are removed (case-insensitive).
  *   5. No hardcoded recipient email lists.
- *
- * EXTENSIBILITY:
- *   To add a custom audience later (e.g. "March Clients", "Hot Leads",
- *   "Mumbai Clients") without touching the send path, register a rule with
- *   registerSegmentRule({ match, test }). The resolver + the dropdown count pick
- *   it up automatically. Custom lists that are stored contact-list references can
- *   also be supported by adding a rule that resolves the list membership here.
+ *   6. `company_category` is never consulted when filtering by audience segment.
  *
  * This module is intentionally pure (no Deno / Node / browser APIs) so it can be
  * imported unchanged by both the Vite frontend and the Deno Edge Functions.
@@ -85,72 +92,61 @@ export function isDeliverableRecipientEmail(email: unknown): boolean {
 //
 // Each rule: { match(name) → boolean, test(contact) → boolean }.
 // `match` decides whether the rule applies to a given segment NAME; `test` decides
-// whether a contact belongs to that segment. Add custom audiences here.
+// whether a contact belongs to that segment. Custom audiences can be registered
+// here via registerSegmentRule, but the DEFAULT behaviour is strict: a selected
+// Audience Segment maps DIRECTLY to `contacts.contact_type` (exact, case-
+// insensitive match). There are deliberately NO built-in prefix/category rules,
+// so a specific segment can never silently expand to a wider set of contacts.
 
 export type SegmentRule = {
   match: (name: string) => boolean;
   test: (contact: SegmentContact) => boolean;
 };
 
-const SEGMENT_RULES: SegmentRule[] = [
-  {
-    match: (n) => n.includes('existing client'),
-    test: (c) => {
-      const t = normalizeAudienceValue(c.contact_type ?? c.type);
-      return t === 'existing client' || t.startsWith('existing client ');
-    },
-  },
-  {
-    match: (n) => n.includes('new client'),
-    test: (c) => {
-      const t = normalizeAudienceValue(c.contact_type ?? c.type);
-      return t === 'new client' || t.startsWith('new client ');
-    },
-  },
-  {
-    match: (n) => n.includes('new lead'),
-    test: (c) => normalizeAudienceValue(c.contact_type ?? c.type) === 'new lead',
-  },
-  {
-    match: (n) => n.includes('oem'),
-    test: (c) => normalizeAudienceValue(c.company_category ?? c.category) === 'oem',
-  },
-  {
-    match: (n) => n.includes('international'),
-    test: (c) => normalizeAudienceValue(c.company_category ?? c.category) === 'international',
-  },
-  {
-    match: (n) => n.includes('prospect'),
-    test: (c) => normalizeAudienceValue(c.contact_type ?? c.type) === 'prospect',
-  },
-];
+// Empty by default — audience filtering is strictly by exact `contact_type`.
+// Register rules only for genuinely custom audiences that are NOT a contact_type.
+const SEGMENT_RULES: SegmentRule[] = [];
 
 /**
- * Register an additional audience rule. Used to add custom contact lists
- * (e.g. "March Clients", "Hot Leads", "Mumbai Clients") without modifying the
- * send path. Rules are checked in registration order, after the built-ins.
+ * Register an additional audience rule for genuinely custom audiences (e.g. a
+ * stored custom contact list) that are NOT a `contacts.contact_type` value.
+ * An exact `contact_type` match always takes precedence, so registering a rule
+ * can never override or widen a real contact_type segment.
  */
 export function registerSegmentRule(rule: SegmentRule): void {
   SEGMENT_RULES.push(rule);
 }
 
-/** Whether a contact belongs to the given audience segment (by name). */
+/**
+ * Whether a contact belongs to the given audience segment (by name).
+ *
+ * Resolution order (deliberately contact_type-first, never company_category):
+ *   1. "All Contacts" → every contact.
+ *   2. EXACT `contact_type` match (case-insensitive, trimmed). This is the direct
+ *      connection the requirement demands: selecting "New Lead" resolves exactly
+ *      the rows where `contact_type = 'New Lead'`.
+ *   3. Any custom rules registered via registerSegmentRule (opt-in only).
+ *
+ * `company_category` is NEVER consulted — audience filtering is strictly by
+ * `contact_type`.
+ */
 export function contactMatchesSegment(contact: SegmentContact, segment: string): boolean {
   const name = normalizeAudienceValue(segment);
   if (!name) return false;
   // "All Contacts" is the universal segment — every contact belongs to it.
   if (name === 'all contacts') return true;
 
+  // 1. Direct, exact contact_type match — the source of truth.
+  const type = normalizeAudienceValue(contact?.contact_type ?? contact?.type);
+  if (type && type === name) return true;
+
+  // 2. Opt-in custom rules only (none by default).
   for (const rule of SEGMENT_RULES) {
     if (rule.match(name)) return rule.test(contact || {});
   }
 
-  // Unknown segment name → strict raw contact_type / company_category match.
-  // Preserves the legacy behaviour for literal values and leaves room for
-  // custom lists that map directly to a stored contact_type.
-  const type = normalizeAudienceValue(contact?.contact_type ?? contact?.type);
-  const category = normalizeAudienceValue(contact?.company_category ?? contact?.category);
-  return type === name || category === name;
+  // No company_category fallback — audience filtering is strictly by contact_type.
+  return false;
 }
 
 // ── Manual audience (explicit email list) detection ───────────────────────────

@@ -28,6 +28,7 @@ import {
   uploadEmailTemplate,
   deleteEmailTemplate,
   formatFileSize,
+  formatTime,
 } from '../services/campaignService';
 import { fetchContacts } from '../services/contactsService';
 import { resolveSegmentRecipients, isManualAudience } from '../utils/contactSegment';
@@ -751,6 +752,14 @@ export default function CampaignsTab({
   const [dayOfMonth, setDayOfMonth] = useState(15);
   const [weekdayRule, setWeekdayRule] = useState('First Monday');
   const [previewOpen, setPreviewOpen] = useState(false);
+
+  // ─── BATCH / THROTTLED SENDING STATE (composer) ───
+  // Default OFF so every existing campaign keeps sending all recipients at once.
+  const [batchEnabled, setBatchEnabled] = useState(false);
+  const [batchSize, setBatchSize] = useState(30);
+  // Interval unit: 'minutes' | 'hours'. Stored as minutes in batch_interval_minutes.
+  const [batchIntervalUnit, setBatchIntervalUnit] = useState<'minutes' | 'hours'>('hours');
+  const [batchIntervalValue, setBatchIntervalValue] = useState(1);
   const [previewHtml, setPreviewHtml] = useState('');
   const [compBody, setCompBody] = useState('');
   const [editingId, setEditingId] = useState<string | null>(null);
@@ -873,35 +882,26 @@ export default function CampaignsTab({
 
   // Load the Audience Segment + Campaign Type dropdown options from Supabase.
   //
-  // The Campaign Audience Segment is driven by the REAL database lookup tables:
-  //   - `contact_types`     → one option per contact type (e.g. "Existing Client",
-  //                          "New Client", "New Lead", "Prospect", "Newsletter",
-  //                          "Partner", "Test Client", "VIP Client").
-  //   - `company_categories` → one option per company category (e.g. "OEM",
-  //                          "International", "Startup", "Domestic").
+  // The Campaign Audience Segment is driven EXCLUSIVELY by `contact_types`
+  // (one option per contact type, e.g. "Existing Client (Vatsal/ Shubham)",
+  // "New Client - Inbound", "New Client - Outbound", "New Lead", "Test Client").
+  // Each option's value is the EXACT `contacts.contact_type` string, so selecting
+  // a segment is a direct connection to `contacts.contact_type` — the resolver
+  // resolves `WHERE contact_type = <segment>` (exact, case-insensitive).
   //
-  // A contact is linked to a `contact_type` / `company_category` by the EXISTING
-  // relationship: the `contacts.contact_type` / `contacts.company_category` TEXT
-  // values match the lookup table `name`. There is NO foreign-key column named
-  // `contact_type_id` — the join is by the `name` column, exactly as the shared
-  // resolver (src/utils/contactSegment → supabase/functions/_shared/audience.ts)
-  // expects.
+  // `company_categories` are intentionally NOT offered as audience segments: per
+  // requirement, audience filtering must never use `company_category`.
   //
   // The segment COUNT is computed from the `contacts` table via getSegmentCount,
   // so it always equals the number of recipients the campaign actually emails.
-  // Adding a row to `contact_types` / `company_categories` makes it appear here
-  // automatically — no frontend code change required.
+  // Adding a row to `contact_types` makes it appear here automatically — no
+  // frontend code change required.
   const loadDropdownOptions = useCallback(async () => {
     setDropdownsLoading(true);
     setDropdownsError(null);
-    const [ctRes, ccRes, typeRes] = await Promise.all([
+    const [ctRes, typeRes] = await Promise.all([
       supabase
         .from('contact_types')
-        .select('id, name')
-        .eq('is_active', true)
-        .order('name'),
-      supabase
-        .from('company_categories')
         .select('id, name')
         .eq('is_active', true)
         .order('name'),
@@ -913,17 +913,15 @@ export default function CampaignsTab({
     ]);
     const errors: string[] = [];
     if (ctRes.error) errors.push('Failed to load contact types.');
-    if (ccRes.error) errors.push('Failed to load company categories.');
     if (typeRes.error) errors.push('Failed to load campaign types.');
     if (errors.length > 0) {
       setDropdownsError(errors.join(' '));
     } else {
-      // Contact types first, then company categories. "All Contacts" is added
-      // as the first <option> in the render, showing the total contact count.
-      const segments: { id: string; name: string }[] = [
-        ...(ctRes.data || []).map((r: any) => ({ id: String(r.id), name: r.name })),
-        ...(ccRes.data || []).map((r: any) => ({ id: String(r.id), name: r.name })),
-      ];
+      // "All Contacts" is added as the first <option> in the render, showing the
+      // total contact count. Every other option is an exact contact_type value.
+      const segments: { id: string; name: string }[] = (ctRes.data || []).map(
+        (r: any) => ({ id: String(r.id), name: r.name })
+      );
       setAudienceSegments(segments);
       setCampaignTypes((typeRes.data || []) as { id: string; name: string }[]);
     }
@@ -1112,6 +1110,18 @@ export default function CampaignsTab({
     setCompType(typeStillExists ? normalizedType : (c.campaignType || 'Custom'));
     setCompDate(c.scheduleDate);
     setCompTime(c.scheduleTime || '10:00 AM');
+    // Prefill batch / throttled-sending settings (defaults keep existing
+    // campaigns sending all recipients at once).
+    setBatchEnabled(Boolean(c.batchEnabled));
+    setBatchSize(typeof c.batchSize === 'number' ? c.batchSize : 30);
+    const savedInterval = typeof c.batchIntervalMinutes === 'number' ? c.batchIntervalMinutes : 60;
+    if (savedInterval >= 60 && savedInterval % 60 === 0) {
+      setBatchIntervalUnit('hours');
+      setBatchIntervalValue(savedInterval / 60);
+    } else {
+      setBatchIntervalUnit('minutes');
+      setBatchIntervalValue(savedInterval);
+    }
     // Load the campaign's saved email the way a recipient would see it: raw
     // MIME / email-source bodies are parsed down to their decoded HTML, already
     // rendered HTML is used verbatim, and legacy plain-text bodies stay plain
@@ -1199,6 +1209,12 @@ export default function CampaignsTab({
       schedule_time: status === 'scheduled' ? (compTime || undefined) : undefined,
       template_name: selectedTemplate?.name || null,
       template_id: selectedTemplate?.id || null,
+      batch_enabled: batchEnabled,
+      batch_size: Math.max(1, Number(batchSize) || 30),
+      batch_interval_minutes:
+        batchIntervalUnit === 'hours'
+          ? Math.max(1, Number(batchIntervalValue) || 1) * 60
+          : Math.max(1, Number(batchIntervalValue) || 1),
       schedule: includeSchedule
         ? buildScheduleInput({
             scheduleType,
@@ -1281,6 +1297,10 @@ export default function CampaignsTab({
       setMonthlyOption('day');
       setDayOfMonth(15);
       setWeekdayRule('First Monday');
+      setBatchEnabled(false);
+      setBatchSize(30);
+      setBatchIntervalUnit('hours');
+      setBatchIntervalValue(1);
 setCompBody('');
     setBodyIsHtml(false);
     setEditorMode('text');
@@ -1967,7 +1987,26 @@ setCompBody('');
                         <span className={`tag ${
                           c.status.toLowerCase() === 'sent' ? 'tag-client' :
                           c.status.toLowerCase() === 'scheduled' ? 'tag-oem' : 'tag-draft'
-                        }`}>{c.status}</span>
+                        }`}>{c.batchEnabled && c.status.toLowerCase() !== 'sent' ? 'Sending in batches' : c.status}</span>
+                        {c.batchEnabled && (
+                          <div style={{ marginTop: '6px', fontSize: '11px', color: 'var(--text3)', lineHeight: 1.5 }}>
+                            <div>
+                              <strong style={{ color: 'var(--text2)' }}>{c.sentCount}</strong>
+                              {' / '}
+                              {c.recipientCount || '?'} sent
+                            </div>
+                            <div>
+                              Batch: <strong style={{ color: 'var(--text2)' }}>
+                                {c.currentBatchNumber || 0}
+                              </strong>
+                              {' / '}
+                              {c.totalBatches || '?'}
+                            </div>
+                            {c.status.toLowerCase() === 'scheduled' && c.nextBatchAt && (
+                              <div>Next: {formatTime(c.nextBatchAt)}</div>
+                            )}
+                          </div>
+                        )}
                       </td>
                       <td>
                         <div style={{ display: 'flex', gap: '3px' }}>
@@ -2258,6 +2297,123 @@ setCompBody('');
                         style={{ width: '160px', height: '48px', padding: '0 16px', border: '1px solid #E2E8F0', borderRadius: '10px', fontSize: '13px', outline: 'none' }}
                       />
                     </div>
+                  </div>
+                )}
+              </div>
+
+              {/* ─── SENDING LIMITS (BATCH / THROTTLED SENDING) ─── */}
+              <div style={{ height: '1px', background: '#E5E7EB', margin: '4px 0 8px' }} />
+              <div style={{ fontSize: '12px', letterSpacing: '0.05em', color: '#8A94A6', marginBottom: '12px', fontWeight: 700, textTransform: 'uppercase' }}>Sending Limits</div>
+              <div style={{ display: 'flex', flexDirection: 'column', gap: '16px' }}>
+                <label style={{ display: 'flex', alignItems: 'center', gap: '10px', fontSize: '14px', color: '#334155', cursor: 'pointer', fontWeight: 600 }}>
+                  <input
+                    type="checkbox"
+                    checked={batchEnabled}
+                    onChange={(e) => setBatchEnabled(e.target.checked)}
+                    style={{ accentColor: '#2563EB', width: '18px', height: '18px', cursor: 'pointer', margin: 0 }}
+                  />
+                  Send in batches
+                </label>
+
+                {batchEnabled && (
+                  <div style={{ display: 'flex', flexDirection: 'column', gap: '16px', paddingLeft: '8px', borderLeft: '3px solid #EFF6FF' }}>
+                    <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: '16px' }}>
+                      <div className="form-group" style={{ margin: 0 }}>
+                        <label style={{ fontSize: '14px', fontWeight: 600, color: '#334155', display: 'block', marginBottom: '6px' }}>Batch Size</label>
+                        <select
+                          value={[10, 20, 30, 50, 100].includes(Number(batchSize)) ? String(batchSize) : 'custom'}
+                          onChange={(e) => {
+                            if (e.target.value === 'custom') {
+                              setBatchSize(Math.max(1, Number(batchSize) || 30));
+                            } else {
+                              setBatchSize(Number(e.target.value));
+                            }
+                          }}
+                          style={{ width: '100%', height: '48px', padding: '0 12px', border: '1px solid #E2E8F0', borderRadius: '10px', fontSize: '13px', outline: 'none', cursor: 'pointer' }}
+                        >
+                          {[10, 20, 30, 50, 100].map((n) => (
+                            <option key={n} value={n}>{n}</option>
+                          ))}
+                          <option value="custom">Custom ({batchSize})</option>
+                        </select>
+                        {!['10', '20', '30', '50', '100'].includes(String(batchSize)) && (
+                          <input
+                            type="number"
+                            min={1}
+                            value={batchSize}
+                            onChange={(e) => setBatchSize(Math.max(1, Number(e.target.value) || 1))}
+                            style={{ width: '100%', height: '44px', marginTop: '8px', padding: '0 12px', border: '1px solid #E2E8F0', borderRadius: '10px', fontSize: '13px', outline: 'none' }}
+                          />
+                        )}
+                      </div>
+
+                      <div className="form-group" style={{ margin: 0 }}>
+                        <label style={{ fontSize: '14px', fontWeight: 600, color: '#334155', display: 'block', marginBottom: '6px' }}>Send next batch after</label>
+                        <div style={{ display: 'flex', gap: '8px' }}>
+                          <input
+                            type="number"
+                            min={1}
+                            value={batchIntervalValue}
+                            onChange={(e) => setBatchIntervalValue(Math.max(1, Number(e.target.value) || 1))}
+                            style={{ width: '72px', height: '48px', padding: '0 10px', border: '1px solid #E2E8F0', borderRadius: '10px', fontSize: '13px', outline: 'none', textAlign: 'center' }}
+                          />
+                          <select
+                            value={batchIntervalUnit}
+                            onChange={(e) => setBatchIntervalUnit(e.target.value as 'minutes' | 'hours')}
+                            style={{ flex: 1, height: '48px', padding: '0 10px', border: '1px solid #E2E8F0', borderRadius: '10px', fontSize: '13px', outline: 'none', cursor: 'pointer' }}
+                          >
+                            <option value="minutes">Minute(s)</option>
+                            <option value="hours">Hour(s)</option>
+                          </select>
+                        </div>
+                      </div>
+                    </div>
+
+                    {(() => {
+                      const audienceCount = getSegmentCount(compAudience);
+                      const resolvedBatchSize = Math.max(1, Number(batchSize) || 30);
+                      const intervalMinutes =
+                        batchIntervalUnit === 'hours'
+                          ? Math.max(1, batchIntervalValue) * 60
+                          : Math.max(1, batchIntervalValue);
+                      const estimatedBatches = audienceCount > 0 ? Math.ceil(audienceCount / resolvedBatchSize) : 0;
+                      const totalIntervalHours =
+                        estimatedBatches > 1 ? ((estimatedBatches - 1) * intervalMinutes) / 60 : 0;
+                      return (
+                        <div style={{ fontSize: '13px', color: '#475569', background: '#F8FAFC', border: '1px solid #E2E8F0', borderRadius: '10px', padding: '12px 14px', lineHeight: 1.6 }}>
+                          <div>
+                            <strong style={{ color: '#334155' }}>{resolvedBatchSize}</strong> contacts will be sent every{' '}
+                            <strong style={{ color: '#334155' }}>
+                              {batchIntervalValue} {batchIntervalUnit === 'hours' ? (batchIntervalValue === 1 ? 'hour' : 'hours') : batchIntervalValue === 1 ? 'minute' : 'minutes'}
+                            </strong>
+                            .
+                          </div>
+                          {audienceCount > 0 ? (
+                            <>
+                              <div style={{ marginTop: '6px' }}>
+                                Audience: <strong style={{ color: '#334155' }}>{compAudience}</strong> ({audienceCount})
+                              </div>
+                              <div style={{ marginTop: '2px' }}>
+                                Estimated batches: <strong style={{ color: '#334155' }}>{estimatedBatches}</strong>
+                              </div>
+                              <div style={{ marginTop: '2px' }}>
+                                Estimated completion: approximately{' '}
+                                <strong style={{ color: '#334155' }}>
+                                  {totalIntervalHours < 1
+                                    ? `${Math.round(totalIntervalHours * 60)} minutes`
+                                    : `${totalIntervalHours % 1 === 0 ? totalIntervalHours : totalIntervalHours.toFixed(1)} hour(s)`}
+                                </strong>{' '}
+                                after the first batch
+                              </div>
+                            </>
+                          ) : (
+                            <div style={{ marginTop: '6px', color: '#94A3B8' }}>
+                              Select an audience to estimate batches.
+                            </div>
+                          )}
+                        </div>
+                      );
+                    })()}
                   </div>
                 )}
               </div>

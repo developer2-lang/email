@@ -23,6 +23,13 @@ export interface CampaignRow {
   sent_count?: number | null
   open_rate?: number | null
   click_rate?: number | null
+  // ── Batch / throttled sending ──
+  batch_enabled?: boolean | null
+  batch_size?: number | null
+  batch_interval_minutes?: number | null
+  current_batch_number?: number | null
+  total_batches?: number | null
+  next_batch_at?: string | null
 }
 
 export interface CampaignInput {
@@ -37,6 +44,10 @@ export interface CampaignInput {
   html_content?: string | null
   template_name?: string | null
   status?: string | null
+  // ── Batch / throttled sending ──
+  batch_enabled?: boolean | null
+  batch_size?: number | null
+  batch_interval_minutes?: number | null
 }
 
 export interface Campaign {
@@ -70,6 +81,13 @@ export interface Campaign {
   time: string
   /** Human-readable schedule summary, e.g. "Every Monday • 10:00 AM". */
   scheduleText: string
+  // ── Batch / throttled sending ──
+  batchEnabled?: boolean
+  batchSize?: number
+  batchIntervalMinutes?: number
+  currentBatchNumber?: number
+  totalBatches?: number
+  nextBatchAt?: string | null
 }
 
 export interface EmailTemplate {

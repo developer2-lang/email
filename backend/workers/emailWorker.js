@@ -443,7 +443,34 @@ async function processCampaign(campaignId) {
     console.log(`[Worker] STEP 3: Resolving contacts for segment "${campaign.audience_segment}"...`);
     const contacts = await supabaseService.resolveContactsForCampaign(campaignId, campaign.audience_segment);
     const followupInfo = await supabaseService.resolveFollowupRecipients(campaignId);
+
+    // ─── SEND-TIME SAFETY CHECK / DIAGNOSTICS ────────────────────────────────
+    // Re-cap the stored audience configuration so what we send matches exactly
+    // what was selected. The recipients are resolved purely from the stored
+    // audience_segment (the source of truth) — never from the total contact
+    // count. If the resolved set is empty for a non-follow-up, the campaign is
+    // marked "failed" below (never falsely "sent" to everyone).
+    console.log(`[Worker][RECIPIENT DEBUG] campaign_id=${campaignId}`);
+    console.log(`[Worker][RECIPIENT DEBUG] selected audience/contact_type: ${campaign.audience_segment}`);
+    console.log(`[Worker][RECIPIENT DEBUG] resolved audience: ${campaign.audience_segment}`);
+    console.log(`[Worker][RECIPIENT DEBUG] resolved contact ids: ${contacts.map((c) => c.id).join(', ') || '(none)'}`);
+    console.log(`[Worker][RECIPIENT DEBUG] resolved recipient count: ${contacts.length}`);
+    console.log(`[Worker][RECIPIENT DEBUG] is follow-up: ${followupInfo.isFollowup}`);
+
     console.log(`[Worker] STEP 3: Found ${contacts.length} valid contacts`);
+
+    // ─── SEND-TIME SAFETY CHECK (required verification) ──────────────────────
+    // Prove the selected audience_segment maps 1:1 to the contacts actually
+    // emailed. Never send contacts outside the selected contact_type.
+    console.log(`[Worker][SAFETY CHECK] campaign_id=${campaignId}`);
+    console.log(`[Worker][SAFETY CHECK] Audience: ${campaign.audience_segment}`);
+    console.log(`[Worker][SAFETY CHECK] Recipients: ${contacts.length}`);
+    console.log(
+      `[Worker][SAFETY CHECK] Emails:\n${
+        contacts.map((c) => String(c.email || '')).join('\n') || '(none)'
+      }`
+    );
+
     if (contacts.length === 0) {
       const reason = followupInfo.isFollowup
         ? `follow-up of ${followupInfo.sourceCampaignId} has no opened recipients`

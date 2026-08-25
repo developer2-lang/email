@@ -264,4 +264,11 @@ export interface CampaignLaunchApiRow {
   click_rate: number
   /** Optional pre-rendered schedule text (not currently returned by the backend). */
   schedule_text?: string | null
+  // ── Batch / throttled sending ──
+  batch_enabled?: boolean | null
+  batch_size?: number | null
+  batch_interval_minutes?: number | null
+  current_batch_number?: number | null
+  total_batches?: number | null
+  next_batch_at?: string | null
 }

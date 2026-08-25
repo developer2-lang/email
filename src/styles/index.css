@@ -3201,6 +3201,95 @@ input[type='checkbox'] {
   background: rgba(239, 68, 68, 0.32);
 }
 
+/* Inline bulk-action toolbar shown ABOVE the contacts table (replaces the old
+   floating bar) so the selection controls are always in context. */
+.bulkbar-inline {
+  position: static;
+  transform: none;
+  background: var(--surface, #0f172a);
+  color: var(--text, #fff);
+  display: flex;
+  align-items: center;
+  gap: 14px;
+  padding: 10px 16px;
+  margin-bottom: 12px;
+  border-radius: 12px;
+  box-shadow: 0 8px 24px rgba(15, 23, 42, 0.18);
+  flex-wrap: wrap;
+}
+
+.bulkbar-inline .bulkbar-count {
+  color: inherit;
+}
+
+.bulkbar-inline .bulkbar-sep {
+  background: rgba(148, 163, 184, 0.35);
+}
+
+@media (max-width: 900px) {
+  .bulkbar-inline {
+    width: 100%;
+  }
+}
+
+/* "Select all N contacts" banner that appears when the current page is fully
+   selected and the user can opt into the entire filtered scope. */
+.selectall-banner {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  flex-wrap: wrap;
+  font-size: 12.5px;
+  font-weight: 500;
+  color: var(--text2);
+  background: var(--accent-light, #eef2ff);
+  border: 1px solid var(--accent-border, #c7d2fe);
+  padding: 9px 14px;
+  border-radius: 10px;
+  margin-bottom: 12px;
+}
+
+.selectall-link {
+  background: none;
+  border: none;
+  padding: 0;
+  font: inherit;
+  font-weight: 700;
+  color: var(--accent, #4f46e5);
+  cursor: pointer;
+  text-decoration: underline;
+}
+
+.selectall-link:hover {
+  color: var(--accent-dark, #4338ca);
+}
+
+/* Solid, clearly destructive button used in the delete confirmation dialog. */
+.btn-danger-solid {
+  background: #dc2626;
+  color: #fff;
+  border: 1px solid #b91c1c;
+  padding: 8px 16px;
+  border-radius: 9px;
+  font-size: 13px;
+  font-weight: 600;
+  cursor: pointer;
+  transition: background 0.15s ease;
+}
+
+.btn-danger-solid:hover:not(:disabled) {
+  background: #b91c1c;
+}
+
+.btn-danger-solid:disabled {
+  opacity: 0.6;
+  cursor: not-allowed;
+}
+
+.modal-confirm {
+  max-width: 440px;
+}
+
 @media (max-width: 900px) {
   .ct-search {
     width: 100%;

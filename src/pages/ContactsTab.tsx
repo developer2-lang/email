@@ -9,6 +9,7 @@ import {
   deleteContacts,
   upsertContactsByEmail,
   createContactType,
+  syncContactTypes,
 } from '../services/contactsService';
 import { supabase } from '../supabase';
 
@@ -130,6 +131,11 @@ const CheckIcon = ({ size = 20 }: { size?: number }) => (
     <polyline points="20 6 9 17 4 12" />
   </svg>
 );
+
+// Normalize a contact type for safe comparison. Trims whitespace and is
+// case-insensitive, but the ORIGINAL database value is always preserved when
+// reading/displaying/assigning — only the comparison is normalized.
+const norm = (s?: string | null): string => (s || '').trim().toLowerCase();
 
 // ─── Small presentational components ───────────────────────────────────────
 
@@ -277,6 +283,11 @@ export default function ContactsTab({
   const [cCatFilter, setCCatFilter] = useState('');
   const [cSearchVal, setCSearchVal] = useState('');
   const [selectedIds, setSelectedIds] = useState<Set<any>>(new Set());
+  // When true, the ENTIRE current filtered scope (all pages) is selected — not
+  // just the visible page. This powers the "Select all N contacts" flow.
+  const [allFilteredSelected, setAllFilteredSelected] = useState(false);
+  const [deleteConfirmOpen, setDeleteConfirmOpen] = useState(false);
+  const [deleting, setDeleting] = useState(false);
 
   // ─── DRAG & DROP: assign contacts to a list ───
   // `dragIds` holds the contact ids currently being dragged (used for the
@@ -330,14 +341,29 @@ export default function ContactsTab({
     return list;
   }, [contactTypes, afType]);
 
-  // Segment filter tabs derived from the active contact types.
-  const typeTabs = useMemo(
-    () => [
+  // Segment filter tabs. The canonical set of types comes from the active
+  // contact_types rows, but we ALSO surface any contact_type value that
+  // actually exists on a contact (e.g. "list", "list 1", or a value present in
+  // the data but missing from contact_types). This guarantees every populated
+  // type is clickable and filters correctly. Dedup is normalization-aware so
+  // "Existing Client" and "existing client" never produce two tabs.
+  const typeTabs = useMemo(() => {
+    const byNorm = new Map<string, string>();
+    for (const t of contactTypes) {
+      byNorm.set(norm(t.name), t.name);
+    }
+    for (const c of contacts) {
+      const t = (c.type || '').trim();
+      if (!t) continue;
+      const n = norm(t);
+      if (!byNorm.has(n)) byNorm.set(n, t);
+    }
+    const names = Array.from(byNorm.values()).sort((a, b) => a.localeCompare(b));
+    return [
       { id: 'all', label: 'All Contacts' },
-      ...contactTypes.map((t) => ({ id: t.name, label: t.name })),
-    ],
-    [contactTypes]
-  );
+      ...names.map((name) => ({ id: name, label: name })),
+    ];
+  }, [contactTypes, contacts]);
 
   // ─── EXCEL UPLOADER STATE ───
   const [uploadFileName, setUploadFileName] = useState('');
@@ -345,6 +371,35 @@ export default function ContactsTab({
   const [isDragging, setIsDragging] = useState(false);
 
   const C_PER_PAGE = 15;
+
+  // ─── LOAD CONTACT TYPES FROM SUPABASE ───
+  // These are the available contact types / segments, stored in the existing
+  // `contact_types` table. "Create List" adds a new row here.
+  // Before reading, we synchronize distinct `contacts.contact_type` values into
+  // `contact_types` so every type actually present on a contact (including
+  // compound values like "Existing Client (Vatsal/ Shubham)") appears as a tab.
+  // Synchronization is one-directional and append-only: it only inserts MISSING
+  // types and never removes or overwrites existing rows. The loop is bounded —
+  // it does not re-trigger itself.
+  const reloadContactTypes = useCallback(async () => {
+    setCtLoading(true);
+    setCtError(null);
+    await syncContactTypes();
+    const { data, error } = await supabase
+      .from('contact_types')
+      .select('id, name, is_active')
+      .eq('is_active', true)
+      .order('name');
+    if (error) {
+      setCtError(error.message || 'Failed to load contact types');
+      setContactTypes([]);
+    } else {
+      setContactTypes(
+        (data || []).map((t: any) => ({ id: t.id, name: t.name }))
+      );
+    }
+    setCtLoading(false);
+  }, []);
 
   // ─── LOAD CONTACTS FROM SUPABASE ───
   const refreshContacts = useCallback(async () => {
@@ -359,7 +414,11 @@ export default function ContactsTab({
       onPersistContacts(data || []);
     }
     setLoading(false);
-  }, [onPersistContacts, onToast]);
+    // Contacts are the source of truth for the set of contact types. After they
+    // load (or after an import adds new types), re-sync the tabs. This is a
+    // single pass — reloadContactTypes reads/writes and stops; it never loops.
+    void reloadContactTypes();
+  }, [onPersistContacts, onToast, reloadContactTypes]);
 
   useEffect(() => {
     const loadContacts = async () => {
@@ -368,35 +427,14 @@ export default function ContactsTab({
     void loadContacts();
   }, [refreshContacts]);
 
-  // ─── LOAD CONTACT TYPES FROM SUPABASE ───
-  // These are the available contact types / segments, stored in the existing
-  // `contact_types` table. "Create List" adds a new row here.
-  useEffect(() => {
-    let cancelled = false;
-    const loadContactTypes = async () => {
-      setCtLoading(true);
-      setCtError(null);
-      const { data, error } = await supabase
-        .from('contact_types')
-        .select('id, name, is_active')
-        .eq('is_active', true)
-        .order('name');
-      if (cancelled) return;
-      if (error) {
-        setCtError(error.message || 'Failed to load contact types');
-        setContactTypes([]);
-      } else {
-        setContactTypes(
-          (data || []).map((t: any) => ({ id: t.id, name: t.name }))
-        );
-      }
-      setCtLoading(false);
-    };
-    void loadContactTypes();
-    return () => {
-      cancelled = true;
-    };
+  // Changing the view/filter/search changes the selection scope, so reset any
+  // selection (including a whole-scope "Select all") to avoid deleting contacts
+  // that are no longer visible under the active filter.
+  const clearSelection = useCallback(() => {
+    setSelectedIds(new Set());
+    setAllFilteredSelected(false);
   }, []);
+
 
   // ─── CREATE CONTACT TYPE / SEGMENT ───
   // The "Create List" action creates a new CONTACT TYPE (segment) in the existing
@@ -434,9 +472,9 @@ export default function ContactsTab({
   // ─── CONTACT METRICS ───
   const metrics = useMemo(() => {
     const total = contacts.length;
-    const activeProfiles = contacts.filter(c => c.type && String(c.type).trim().toLowerCase() !== 'newsletter').length;
-    const newLeads = contacts.filter(c => c.type === 'New Lead').length;
-    const unqualified = contacts.filter(c => c.type === 'Prospect').length;
+    const activeProfiles = contacts.filter(c => c.type && norm(c.type) !== 'newsletter').length;
+    const newLeads = contacts.filter(c => norm(c.type) === 'new lead').length;
+    const unqualified = contacts.filter(c => norm(c.type) === 'prospect').length;
     const highEngagement = contacts.filter(c => (c.engagement || 0) >= 70).length;
     const enriched = contacts.filter(c => c.enriched).length;
     const verifiedMeta = contacts.filter(
@@ -447,11 +485,16 @@ export default function ContactsTab({
 
   // Per-list contact counts (derived from the existing contact_type field) so
   // each tab shows a live count that updates immediately after a drop.
+  // Contact types are compared case/whitespace-insensitively (point 5) and a
+  // contact with a NULL/empty contact_type is NOT attributed to any type — it
+  // lives only under "All Contacts".
   const typeCounts = useMemo(() => {
     const counts: Record<string, number> = {};
     for (const c of contacts) {
-      const t = c.type || 'New Lead';
-      counts[t] = (counts[t] || 0) + 1;
+      const t = (c.type || '').trim();
+      if (!t) continue;
+      const key = norm(t);
+      counts[key] = (counts[key] || 0) + 1;
     }
     return counts;
   }, [contacts]);
@@ -472,7 +515,8 @@ export default function ContactsTab({
     }
 
     if (cTypeFilter !== 'all') {
-      result = result.filter(c => c.type === cTypeFilter);
+      const filterKey = norm(cTypeFilter);
+      result = result.filter(c => norm(c.type) === filterKey);
     }
 
     if (cCatFilter) {
@@ -497,6 +541,20 @@ export default function ContactsTab({
 
   const totalPages = Math.ceil(filteredContacts.length / C_PER_PAGE) || 1;
 
+  // ─── SELECTION DERIVED STATE ───
+  // A contact is selected if the user opted into the whole filtered scope, or if
+  // it is explicitly present in `selectedIds`. We never select by name/email —
+  // only by the stable `contacts.id` value.
+  const isSelected = (id: any): boolean => allFilteredSelected || selectedIds.has(id);
+  const selectedCount = allFilteredSelected ? filteredContacts.length : selectedIds.size;
+  const pageFullySelected =
+    paginatedContacts.length > 0 && paginatedContacts.every(c => isSelected(c.id));
+  // Header checkbox: checked when the entire filtered scope is selected,
+  // indeterminate when only some are selected.
+  const allFilteredSelectedNow =
+    filteredContacts.length > 0 && filteredContacts.every(c => isSelected(String(c.id)));
+  const headerIndeterminate = !allFilteredSelectedNow && selectedCount > 0;
+
   // ─── SORT HANDLER ───
   const handleSort = (key: string) => {
     if (cSortKey === key) {
@@ -509,22 +567,52 @@ export default function ContactsTab({
   };
 
   // ─── SELECTIONS ───
+  // Toggle a single contact. If the whole filtered scope is currently selected
+  // via "Select all N", we fall back to explicit mode: select everything in the
+  // current filtered scope EXCEPT this row (so the rest stay selected).
   const handleSelectOne = (id: any) => {
+    const sid = String(id);
+    if (allFilteredSelected) {
+      const next = new Set(filteredContacts.map(c => String(c.id)));
+      next.delete(sid);
+      setSelectedIds(next);
+      setAllFilteredSelected(false);
+      return;
+    }
     setSelectedIds(prev => {
       const next = new Set(prev);
-      if (next.has(id)) next.delete(id);
-      else next.add(id);
+      if (next.has(sid)) next.delete(sid);
+      else next.add(sid);
       return next;
     });
   };
 
+  // Header checkbox toggle. Checking it selects the CURRENT PAGE only and shows
+  // the "Select all N contacts" banner so the user can opt into the entire
+  // filtered set. We never silently limit nor silently expand the operation.
   const handleSelectAll = (checked: boolean) => {
     if (checked) {
-      const ids = filteredContacts.map(c => c.id);
-      setSelectedIds(new Set(ids));
-    } else {
+      const next = new Set(selectedIds);
+      for (const c of paginatedContacts) next.add(String(c.id));
+      setSelectedIds(next);
+      setAllFilteredSelected(false);
+    } else if (allFilteredSelected) {
+      // Unchecking while the whole scope is selected clears everything.
       setSelectedIds(new Set());
+      setAllFilteredSelected(false);
+    } else {
+      // Unchecking clears just the current page's selections.
+      const next = new Set(selectedIds);
+      for (const c of paginatedContacts) next.delete(String(c.id));
+      setSelectedIds(next);
     }
+  };
+
+  // Expand the selection to the entire current filtered scope (respects the
+  // active tab/filter/search — does NOT touch unrelated contacts).
+  const handleSelectAllFiltered = () => {
+    setSelectedIds(new Set(filteredContacts.map(c => String(c.id))));
+    setAllFilteredSelected(true);
   };
 
   // ─── DRAG & DROP HANDLERS ───
@@ -536,7 +624,7 @@ export default function ContactsTab({
     // If the dragged row is part of the current multi-selection, drag the whole
     // selection; otherwise drag just this one contact.
     const ids: string[] =
-      selectedIds.has(c.id) && selectedIds.size > 0
+      isSelected(c.id) && selectedCount > 0
         ? Array.from(selectedIds).map(String)
         : [String(c.id)];
 
@@ -609,8 +697,9 @@ export default function ContactsTab({
     }
 
     // Requirement: never create a duplicate relationship. A contact already in
-    // this list (contact_type === listName) is skipped.
-    const toUpdate = targets.filter(c => c.type !== listName);
+    // this list (contact_type === listName) is skipped. Comparison is
+    // normalization-aware so "New Lead" and "new lead" are treated as equal.
+    const toUpdate = targets.filter(c => norm(c.type) !== norm(listName));
     if (toUpdate.length === 0) {
       onToast(
         targets.length === 1
@@ -688,23 +777,56 @@ export default function ContactsTab({
   };
 
   // ─── BULK ACTIONS ───
-  const handleBulkDelete = async () => {
-    if (!confirm(`Are you sure you want to delete ${selectedIds.size} selected contacts?`)) return;
-    const idsArray = Array.from(selectedIds).map(id => String(id));
-    const { error } = await deleteContacts(idsArray);
-    if (error) {
-      onToast('Failed to delete contacts: ' + error, 'error');
+  // Open the (styled) delete confirmation dialog. Deletion only proceeds after
+  // the user explicitly confirms — we never delete automatically.
+  const handleBulkDelete = () => {
+    if (selectedCount === 0) return;
+    setDeleteConfirmOpen(true);
+  };
+
+  // Perform the actual Supabase deletion after confirmation. We identify records
+  // strictly by `contacts.id` — never by name or email. If the entire filtered
+  // scope was selected, we delete the exact ids in that scope (this respects the
+  // active tab/filter). On failure we keep the selection intact and surface the
+  // real error.
+  const confirmBulkDelete = async () => {
+    const idsArray = allFilteredSelected
+      ? filteredContacts.map(c => String(c.id))
+      : Array.from(selectedIds).map(id => String(id));
+
+    if (idsArray.length === 0) {
+      setDeleteConfirmOpen(false);
       return;
     }
-    setSelectedIds(new Set());
-    setLoading(true);
-    await refreshContacts();
-    onToast(`${idsArray.length} contacts deleted`, 'info');
+
+    setDeleting(true);
+    setDeleteConfirmOpen(false);
+    try {
+      const { error } = await deleteContacts(idsArray);
+      if (error) {
+        console.error('[Contacts] Bulk delete failed:', error, 'ids:', idsArray);
+        onToast('Failed to delete contacts: ' + error, 'error');
+        setDeleting(false);
+        return;
+      }
+      // Success: clear selection, refresh contacts + counts + active tab count.
+      setSelectedIds(new Set());
+      setAllFilteredSelected(false);
+      setLoading(true);
+      await refreshContacts();
+      onToast(`${idsArray.length} contacts deleted successfully.`, 'success');
+    } catch (err) {
+      const message = err instanceof Error ? err.message : String(err);
+      console.error('[Contacts] Bulk delete threw:', err);
+      onToast('Failed to delete contacts: ' + message, 'error');
+    } finally {
+      setDeleting(false);
+    }
   };
 
   const handleBulkToCampaign = () => {
     const selectedEmails = filteredContacts
-      .filter(c => selectedIds.has(c.id))
+      .filter(c => isSelected(c.id))
       .map(c => c.email)
       .filter(Boolean);
 
@@ -719,6 +841,7 @@ export default function ContactsTab({
       onToast(`${selectedEmails.length} contacts queued for campaign`, 'success');
     }
     setSelectedIds(new Set());
+    setAllFilteredSelected(false);
   };
 
   const handleBulkEnrich = () => {
@@ -727,8 +850,9 @@ export default function ContactsTab({
       onNavigate('settings');
       return;
     }
-    onToast(`Enrichment initiated for ${selectedIds.size} contacts`, 'info');
+    onToast(`Enrichment initiated for ${selectedCount} contacts`, 'info');
     setSelectedIds(new Set());
+    setAllFilteredSelected(false);
   };
 
   // ─── MODAL OPENERS ───
@@ -983,7 +1107,7 @@ export default function ContactsTab({
               Contacts
             </div>
             <div className="ct-record-count">
-              {contacts.length} records
+              {loading ? contacts.length : filteredContacts.length} records
             </div>
           </div>
           <div className="ct-toolbar-right">
@@ -994,14 +1118,14 @@ export default function ContactsTab({
               <input
                 type="search"
                 value={cSearchVal}
-                onChange={(e) => { setCSearchVal(e.target.value); setCPage(1); }}
+                onChange={(e) => { setCSearchVal(e.target.value); setCPage(1); clearSelection(); }}
                 placeholder="Search name, company, email..."
               />
             </div>
             <select
               className="ct-select"
               value={cCatFilter}
-              onChange={(e) => { setCCatFilter(e.target.value); setCPage(1); }}
+              onChange={(e) => { setCCatFilter(e.target.value); setCPage(1); clearSelection(); }}
             >
               <option value="">All Categories</option>
               <option value="OEM">OEM</option>
@@ -1022,12 +1146,12 @@ export default function ContactsTab({
           {typeTabs.map(tab => {
             const isAll = tab.id === 'all';
             const isDropActive = dropTargetList === tab.id;
-            const tabCount = isAll ? metrics.total : typeCounts[tab.id] || 0;
+            const tabCount = isAll ? metrics.total : typeCounts[norm(tab.id)] || 0;
             return (
               <button
                 key={tab.id}
                 className={`ct-tab ${cTypeFilter === tab.id ? 'active' : ''} ${isDropActive ? 'drop-active' : ''}`}
-                onClick={() => { setCTypeFilter(tab.id); setCPage(1); }}
+                onClick={() => { setCTypeFilter(tab.id); setCPage(1); clearSelection(); }}
                 onDragOver={(e) => handleTabDragOver(e, tab.id)}
                 onDragLeave={(e) => handleTabDragLeave(e, tab.id)}
                 onDrop={(e) => handleTabDrop(e, tab.id)}
@@ -1048,6 +1172,50 @@ export default function ContactsTab({
           </button>
         </div>
 
+        {/* ─── BULK ACTION TOOLBAR (above the table) ─── */}
+        {selectedCount > 0 && (
+          <div className="bulkbar bulkbar-inline">
+            <div className="bulkbar-count">
+              <span className="bulkbar-num">{selectedCount}</span>
+              {selectedCount === 1 ? 'contact selected' : 'contacts selected'}
+            </div>
+            <div className="bulkbar-sep"></div>
+            <div className="bulkbar-actions">
+              <button
+                onClick={handleBulkEnrich}
+                className="bulkbar-btn bulkbar-btn-enrich"
+                disabled={deleting}
+              >
+                <SparklesIcon /> Enrich Lusha
+              </button>
+              <button
+                onClick={handleBulkToCampaign}
+                className="bulkbar-btn bulkbar-btn-queue"
+                disabled={deleting}
+              >
+                <SendIcon /> Queue Campaign
+              </button>
+              <button
+                onClick={handleBulkDelete}
+                className="bulkbar-btn bulkbar-btn-delete"
+                disabled={deleting}
+              >
+                <TrashIcon /> {deleting ? 'Deleting…' : 'Delete'}
+              </button>
+            </div>
+          </div>
+        )}
+
+        {/* ─── SELECT-ALL-SCOPE BANNER ─── */}
+        {selectedCount > 0 && pageFullySelected && !allFilteredSelected && (
+          <div className="selectall-banner">
+            All {paginatedContacts.length} contacts on this page are selected.{' '}
+            <button className="selectall-link" onClick={handleSelectAllFiltered}>
+              Select all {filteredContacts.length} contacts
+            </button>
+          </div>
+        )}
+
         {/* ─── CONTACTS TABLE ─── */}
         <div className="ct-table-wrap">
           <table className="ct-table">
@@ -1055,9 +1223,13 @@ export default function ContactsTab({
               <tr>
                 <th style={{ width: 42 }}>
                   <input
+                    ref={(el) => {
+                      if (el) el.indeterminate = headerIndeterminate;
+                    }}
                     type="checkbox"
-                    checked={filteredContacts.length > 0 && selectedIds.size === filteredContacts.length}
+                    checked={allFilteredSelectedNow}
                     onChange={(e) => handleSelectAll(e.target.checked)}
+                    aria-label="Select all contacts"
                   />
                 </th>
                 <th className="ct-sortable" onClick={() => handleSort('name')}>
@@ -1119,7 +1291,7 @@ export default function ContactsTab({
                       <td>
                         <input
                           type="checkbox"
-                          checked={selectedIds.has(c.id)}
+                          checked={isSelected(c.id)}
                           onChange={() => handleSelectOne(c.id)}
                         />
                       </td>
@@ -1228,37 +1400,6 @@ export default function ContactsTab({
           </div>
         )}
       </div>
-
-      {/* ─── FLOATING BULK SELECTION ACTION BAR ─── */}
-      {selectedIds.size > 0 && (
-        <div className="bulkbar">
-          <div className="bulkbar-count">
-            <span className="bulkbar-num">{selectedIds.size}</span>
-            selected
-          </div>
-          <div className="bulkbar-sep"></div>
-          <div className="bulkbar-actions">
-            <button
-              onClick={handleBulkEnrich}
-              className="bulkbar-btn bulkbar-btn-enrich"
-            >
-              <SparklesIcon /> Enrich Lusha
-            </button>
-            <button
-              onClick={handleBulkToCampaign}
-              className="bulkbar-btn bulkbar-btn-queue"
-            >
-              <SendIcon /> Queue Campaign
-            </button>
-            <button
-              onClick={handleBulkDelete}
-              className="bulkbar-btn bulkbar-btn-delete"
-            >
-              <TrashIcon /> Delete
-            </button>
-          </div>
-        </div>
-      )}
 
       {/* ─── MODAL: CONTACTS ADD/EDIT ─── */}
       {isContactModalOpen && (
@@ -1592,6 +1733,42 @@ export default function ContactsTab({
               </button>
               <button className="btn btn-primary" disabled={creatingList} onClick={handleCreateList}>
                 {creatingList ? 'Creating…' : 'Create List'}
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {/* ─── MODAL: BULK DELETE CONFIRMATION ─── */}
+      {deleteConfirmOpen && (
+        <div className="modal-overlay">
+          <div className="modal modal-confirm">
+            <div className="modal-header">
+              <div>
+                <div className="modal-title">Delete selected contacts?</div>
+                <div className="ct-sub" style={{ marginTop: 3 }}>
+                  This will permanently delete the selected contacts and their contact records.
+                </div>
+              </div>
+              <button className="modal-close" onClick={() => setDeleteConfirmOpen(false)} title="Close" disabled={deleting}>
+                <CloseIcon size={16} />
+              </button>
+            </div>
+
+            <div className="modal-footer">
+              <button
+                className="btn btn-ghost"
+                onClick={() => setDeleteConfirmOpen(false)}
+                disabled={deleting}
+              >
+                Cancel
+              </button>
+              <button
+                className="btn-danger-solid"
+                onClick={confirmBulkDelete}
+                disabled={deleting}
+              >
+                {deleting ? 'Deleting…' : 'Delete'}
               </button>
             </div>
           </div>

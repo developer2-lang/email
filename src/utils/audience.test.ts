@@ -6,6 +6,7 @@ import {
 } from './contactSegment';
 
 // Contacts shaped exactly like the DB rows the senders resolve against.
+// `company_category` is present but MUST NOT be used for audience filtering.
 const contacts = [
   { id: '1', contact_type: 'Existing Client (Vatsal/ Shubham)', company_category: 'OEM', email: 'a@client.com' },
   { id: '2', contact_type: 'Existing Client (Vatsal/ Shubham)', company_category: 'International', email: 'b@client.com' },
@@ -20,6 +21,8 @@ const contacts = [
   { id: '10', contact_type: 'New Lead', company_category: 'OEM', email: 'test@example.com' },
   // Duplicate email of id '3' must only be counted once.
   { id: '11', contact_type: 'New Client - Inbound', company_category: 'OEM', email: 'c@client.com' },
+  // A contact_type used to prove a 0-recipient segment does not send.
+  { id: '12', contact_type: 'Test Client', company_category: 'OEM', email: 'h@test.com' },
 ];
 
 describe('email validity', () => {
@@ -32,62 +35,107 @@ describe('email validity', () => {
   });
 });
 
-describe('resolveSegmentRecipients — count === send (no invalid, no dupes)', () => {
-  it('New Clients: 206-style — only New Client category with valid unique emails', () => {
-    const recipients = resolveSegmentRecipients(contacts, 'New Clients');
-    // ids 3,4 (valid) + id 11 duplicates id 3's email (dropped) + id 8 (empty) + id 9 (bad) excluded.
-    const ids = recipients.map((c) => c.id);
-    expect(ids).toEqual(['3', '4']);
-    expect(recipients.length).toBe(2);
-    // The count the UI shows is the same array the sender emails.
-    expect(resolveSegmentRecipients(contacts, 'New Clients').length).toBe(recipients.length);
+describe('direct contact_type matching (requirement: segment === contacts.contact_type)', () => {
+  it('New Lead (1) -> only contacts whose contact_type is exactly "New Lead"', () => {
+    // id 10 has example.com (non-deliverable) so only 5,6 remain valid.
+    const ids = resolveSegmentRecipients(contacts, 'New Lead').map((c) => c.id);
+    expect(ids).toEqual(['5', '6']);
   });
 
-  it('Existing Clients Only', () => {
-    expect(resolveSegmentRecipients(contacts, 'Existing Clients Only').map((c) => c.id)).toEqual(['1', '2']);
+  it('Existing Client (Vatsal/ Shubham) (1) -> exact contact_type match', () => {
+    const ids = resolveSegmentRecipients(contacts, 'Existing Client (Vatsal/ Shubham)').map((c) => c.id);
+    expect(ids).toEqual(['1', '2']);
   });
 
-  it('New Leads', () => {
-    // id 10 has example.com (non-deliverable) so only 5,6 remain.
-    expect(resolveSegmentRecipients(contacts, 'New Leads').map((c) => c.id)).toEqual(['5', '6']);
+  it('New Client - Inbound (1) -> exact contact_type match', () => {
+    // id 8 has empty email and 11 duplicates id 3's email -> only 3.
+    const ids = resolveSegmentRecipients(contacts, 'New Client - Inbound').map((c) => c.id);
+    expect(ids).toEqual(['3']);
   });
 
-  it('OEM Contacts', () => {
-    expect(resolveSegmentRecipients(contacts, 'OEM Contacts').map((c) => c.id)).toEqual(['1', '3', '4', '5', '7']);
+  it('New Client - Outbound (1) -> exact contact_type match', () => {
+    // id 9 has a malformed email -> excluded.
+    const ids = resolveSegmentRecipients(contacts, 'New Client - Outbound').map((c) => c.id);
+    expect(ids).toEqual(['4']);
   });
 
-  it('International Clients', () => {
-    expect(resolveSegmentRecipients(contacts, 'International Clients').map((c) => c.id)).toEqual(['2', '6']);
+  it('Test Client (1) -> exact contact_type match', () => {
+    const ids = resolveSegmentRecipients(contacts, 'Test Client').map((c) => c.id);
+    expect(ids).toEqual(['12']);
   });
 
-  it('All Contacts excludes invalid emails and dedupes, never sends to the whole raw table', () => {
-    const ids = resolveSegmentRecipients(contacts, 'All Contacts').map((c) => c.id);
-    // 11 total rows, but 8/9/10 are invalid and 11 is a duplicate of 3.
-    expect(ids).toEqual(['1', '2', '3', '4', '5', '6', '7']);
-    expect(ids.length).toBe(7);
+  it('a specific segment NEVER expands to the whole audience', () => {
+    expect(resolveSegmentRecipients(contacts, 'New Lead').length).toBeLessThan(contacts.length);
+    expect(resolveSegmentRecipients(contacts, 'New Client - Inbound').length).toBeLessThan(contacts.length);
+  });
+});
+
+describe('company_category is never used for audience filtering', () => {
+  it('a company_category label resolves to 0 recipients (only contact_type is used)', () => {
+    expect(resolveSegmentRecipients(contacts, 'OEM').length).toBe(0);
+    expect(resolveSegmentRecipients(contacts, 'OEM Contacts').length).toBe(0);
+    expect(resolveSegmentRecipients(contacts, 'International Clients').length).toBe(0);
   });
 
-  it('a specific segment never expands to the entire audience', () => {
-    expect(resolveSegmentRecipients(contacts, 'New Leads').length).toBeLessThan(contacts.length);
-  });
-
-  it('resolveSegmentRecipients = unique deliverable emails of matching contacts', () => {
-    for (const seg of ['Existing Clients Only', 'New Clients', 'New Leads', 'OEM Contacts', 'International Clients']) {
+  it('OEM company_category contacts are NOT returned for any contact_type segment', () => {
+    for (const seg of ['New Lead', 'New Client - Inbound', 'Existing Client (Vatsal/ Shubham)']) {
       const resolvedEmails = resolveSegmentRecipients(contacts, seg)
         .map((c) => String(c.email).trim().toLowerCase())
         .sort();
-      const matchingEmails = Array.from(
+      const expectedEmails = Array.from(
         new Set(
           contacts
-            .filter((c) => c.email && isDeliverableRecipientEmail(c.email) && contactMatchesSegment(c, seg))
+            .filter((c) => c.email && isDeliverableRecipientEmail(c.email) && c.contact_type === seg)
             .map((c) => String(c.email).trim().toLowerCase())
         )
       ).sort();
-      expect(resolvedEmails).toEqual(matchingEmails);
-      // The dropdown count is exactly the array the sender emails.
-      expect(
-        resolveSegmentRecipients(contacts, seg).length
-      ).toBe(matchingEmails.length);
+      expect(resolvedEmails).toEqual(expectedEmails);
+    }
+  });
+});
+
+describe('strict contact_type matching — a label that is not an exact contact_type resolves to 0', () => {
+  it('generic labels ("New Clients", "Existing Clients Only", "New Leads") are NOT selectable segments and resolve to 0', () => {
+    // The composer dropdown only offers exact contact_type values, so these
+    // generic labels must not accidentally expand to a wider audience.
+    expect(resolveSegmentRecipients(contacts, 'New Clients').length).toBe(0);
+    expect(resolveSegmentRecipients(contacts, 'Existing Clients Only').length).toBe(0);
+    expect(resolveSegmentRecipients(contacts, 'New Leads').length).toBe(0);
+  });
+
+  it('an unknown segment name resolves to 0 (never the whole audience)', () => {
+    expect(resolveSegmentRecipients(contacts, 'Some Future Type').length).toBe(0);
+  });
+});
+
+describe('All Contacts', () => {
+  it('excludes invalid emails and dedupes - never sends to the whole raw table', () => {
+    const ids = resolveSegmentRecipients(contacts, 'All Contacts').map((c) => c.id);
+    // 12 total rows, but 8/9/10 are invalid and 11 is a duplicate of 3 -> 8 unique valid.
+    expect(ids).toEqual(['1', '2', '3', '4', '5', '6', '7', '12']);
+    expect(ids.length).toBe(8);
+  });
+});
+
+describe('manual email list', () => {
+  it('sends only to the listed, deliverable addresses', () => {
+    const emails = resolveSegmentRecipients(contacts, 'e@lead.com, c@client.com')
+      .map((c) => String(c.email).trim().toLowerCase())
+      .sort();
+    expect(emails).toEqual(['c@client.com', 'e@lead.com']);
+  });
+});
+
+describe('count === send (single source of truth)', () => {
+  it('the dropdown count is exactly the array the sender emails', () => {
+    for (const seg of ['All Contacts', 'New Lead', 'New Client - Inbound', 'Test Client', 'Existing Client (Vatsal/ Shubham)']) {
+      const resolved = resolveSegmentRecipients(contacts, seg);
+      const matching = contacts
+        .filter((c) => c.email && isDeliverableRecipientEmail(c.email) && contactMatchesSegment(c, seg))
+        .map((c) => String(c.email).trim().toLowerCase());
+      const resolvedEmails = resolved.map((c) => String(c.email).trim().toLowerCase()).sort();
+      expect(resolvedEmails).toEqual(Array.from(new Set(matching)).sort());
+      expect(resolved.length).toBe(new Set(matching).size);
     }
   });
 });

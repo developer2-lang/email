@@ -1725,18 +1725,36 @@ export function fetchSequenceRecipients(
  * only ever show the SDK's generic "Failed to send a request to the Edge
  * Function" message instead of the server's JSON error.
  */
-async function extractFunctionError(error: unknown, fallback = 'Edge Function call failed'): Promise<string> {
-  const context = (error as { context?: Response }).context;
-  if (context && typeof context.json === 'function') {
+async function extractFunctionError(
+  functionName: string,
+  error: unknown,
+  fallback = 'Edge Function call failed',
+): Promise<string> {
+  const err = error as { context?: Response; status?: number };
+  const status = err?.status ?? err?.context?.status;
+  const isAuthError = status === 401 || status === 403;
+  if (err?.context && typeof err.context.json === 'function') {
     try {
-      const body = (await context.json()) as { error?: string; message?: string } | null;
-      if (body?.error) return body.error;
-      if (body?.message) return body.message;
+      const body = (await err.context.json()) as { error?: string; message?: string } | null;
+      const detail = body?.error || body?.message;
+      if (detail) {
+        if (isAuthError) {
+          return `${functionName}: authorization failed (HTTP ${status}) — ${detail}`;
+        }
+        return `${functionName}: ${detail}`;
+      }
     } catch {
       // Response body not JSON — fall through to the generic message.
     }
   }
-  return error instanceof Error ? error.message : fallback;
+  if (isAuthError) {
+    return (
+      `${functionName}: authorization failed (HTTP ${status ?? '?'}). ` +
+      `The '${functionName}' Edge Function requires 'verify_jwt = false' in ` +
+      `supabase/config.toml (it is invoked from the browser with the anon key).`
+    );
+  }
+  return `${functionName}: ${error instanceof Error ? error.message : fallback}`;
 }
 
 /**
@@ -1752,7 +1770,7 @@ export function manualSend(
     const { data, error } = await supabase.functions.invoke('sequence-manual-send', {
       body: { sequence_id: id, step_id: stepId, contact_ids: contactIds },
     });
-    if (error) throw new Error(await extractFunctionError(error, 'Manual send failed'));
+    if (error) throw new Error(await extractFunctionError('sequence-manual-send', error, 'Manual send failed'));
     const payload = data as any;
     if (!payload || payload.success === false) {
       throw new Error((payload && payload.error) || 'Manual send failed');

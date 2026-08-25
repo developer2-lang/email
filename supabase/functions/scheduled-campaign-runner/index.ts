@@ -1,15 +1,15 @@
-/**
- * scheduled-campaign-runner — Supabase Edge Function (cloud scheduler).
+﻿/**
+ * scheduled-campaign-runner â€” Supabase Edge Function (cloud scheduler).
  *
  * Triggered by a Supabase pg_cron job every minute (see
  * supabase/scheduled-campaign-setup.sql). It finds campaigns whose scheduled
- * IST date/time has arrived and sends them directly to Gmail SMTP — so a
+ * IST date/time has arrived and sends them directly to Gmail SMTP â€” so a
  * campaign fires at/after its scheduled time even when the laptop (local
  * Node.js backend) is completely OFF.
  *
- * ────────────────────────────────────────────────────────────────────────────
+ * â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
  * WHY THIS FUNCTION SENDS THE EMAILS ITSELF
- * ────────────────────────────────────────────────────────────────────────────
+ * â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
  * The existing Node.js sender (emailWorker.js + Nodemailer) cannot run inside
  * a Supabase Edge Function:
  *   - Edge Functions run on Deno; Nodemailer depends on Node's `net`/`tls`
@@ -19,22 +19,22 @@
  *   - The local backend is unreachable while the laptop is off, so the Edge
  *     Function cannot "trigger" it either.
  * Therefore this function performs the send itself with a small, self-contained
- * SMTP client (Deno.connectTls → smtp.gmail.com:465). It deliberately reuses
+ * SMTP client (Deno.connectTls â†’ smtp.gmail.com:465). It deliberately reuses
  * the exact same conventions as the existing worker so nothing downstream
  * changes:
  *   - Same tables: campaigns, campaign_contacts, email_logs, campaign_analytics
- *   - Same status flow: scheduled → sending → sent (or failed)
+ *   - Same status flow: scheduled â†’ sending â†’ sent (or failed)
  *   - Same merge tags: {{first_name}}, {{company}}, {{designation}}, {{email}}
  *   - Same open-tracking pixel: the existing `campaign-tracker` Edge Function
  *   - Same per-recipient retry semantics (3 retries, then 'failed')
  * Normal/manual sends keep going through the local backend unchanged.
- * ────────────────────────────────────────────────────────────────────────────
+ * â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
  *
  * DUPLICATE-SEND PROTECTION (cron runs every minute):
  *   - Campaign claim: UPDATE campaigns SET status='sending'
- *       WHERE id=... AND status='scheduled'  (atomic — one winner only)
+ *       WHERE id=... AND status='scheduled'  (atomic â€” one winner only)
  *   - Recipient claim: UPDATE email_logs SET status='sending'
- *       WHERE campaign_id=... AND status='pending' (atomic — a recipient is
+ *       WHERE campaign_id=... AND status='pending' (atomic â€” a recipient is
  *       only ever sent by the invocation that claimed its email_log row)
  *   - Budget exit: claimed-but-unsent logs are released back to 'pending' and
  *     the campaign is returned to 'scheduled' (only when recipients remain),
@@ -46,23 +46,23 @@
  *
  * TIMEZONE:
  *   The UI stores schedule_date ("YYYY-MM-DD") and schedule_time (12h/24h) as
- *   IST wall-clock (Asia/Kolkata — the app's intended timezone). This function
+ *   IST wall-clock (Asia/Kolkata â€” the app's intended timezone). This function
  *   ports parseTime/istDateTimeToUtc from backend/services/campaignScheduler.js
  *   verbatim: the wall-clock time is converted to its absolute UTC instant by
  *   Date.UTC(...) - (5h30m), independent of where the function runs. It never
  *   blindly adds/subtracts hours, so 7:00 PM always means 7:00 PM IST.
  *
  * SECRETS (never hard-coded, never logged):
- *   SUPABASE_URL, SUPABASE_SERVICE_ROLE_KEY          — auto-injected by Supabase
+ *   SUPABASE_URL, SUPABASE_SERVICE_ROLE_KEY          â€” auto-injected by Supabase
  *   SMTP_HOST, SMTP_PORT (465), SMTP_USER, SMTP_PASSWORD,
- *   SMTP_FROM, SMTP_FROM_NAME, SMTP_REPLY_TO         — supabase secrets set
- *   CRON_SECRET                                      — shared secret sent by the
+ *   SMTP_FROM, SMTP_FROM_NAME, SMTP_REPLY_TO         â€” supabase secrets set
+ *   CRON_SECRET                                      â€” shared secret sent by the
  *                                                     cron job via x-cron-secret
- *   TRACKING_BASE_URL                                — optional; when set, the
+ *   TRACKING_BASE_URL                                â€” optional; when set, the
  *                                                     legacy click/open rewrite is
  *                                                     also embedded (same as normal
  *                                                     sends). Leave empty on edge.
- *   EDGE_FUNCTION_URL                                — optional override of the
+ *   EDGE_FUNCTION_URL                                â€” optional override of the
  *                                                     campaign-tracker pixel base.
  */
 import { createClient } from 'npm:@supabase/supabase-js@2';
@@ -73,13 +73,19 @@ import {
   resolveContactListRecipients,
   isDeliverableRecipientEmail,
 } from '../_shared/audience.ts';
+import {
+  claimPendingLogsLimited,
+  computeTotalBatches,
+  utcToIstDateStr,
+  utcToIstTimeStr,
+} from '../_shared/batch.ts';
 
 const supabaseUrl = Deno.env.get('SUPABASE_URL')!;
 const supabaseKey =
   Deno.env.get('SUPABASE_SERVICE_ROLE_KEY') || Deno.env.get('SUPABASE_ANON_KEY')!;
 const supabase = createClient(supabaseUrl, supabaseKey);
 
-// ─── Configuration (env) ───────────────────────────────────────────────────
+// â”€â”€â”€ Configuration (env) â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 const CRON_SECRET = (Deno.env.get('CRON_SECRET') || '').trim();
 
 const SMTP_HOST = (Deno.env.get('SMTP_HOST') || 'smtp.gmail.com').trim();
@@ -103,6 +109,20 @@ const RECLAIM_AFTER_MS = 10 * 60 * 1000; // campaigns/logs stuck >10min are reco
 const RETRY_DELAYS = [30, 60, 120]; // seconds — matches the backend worker
 const MAX_RETRIES = RETRY_DELAYS.length;
 
+// ─── Column-presence guard (graceful rollout) ───────────────────────────────
+// The campaigns.batch_* columns + email_logs.batch_number are added by the
+// batching migration. Until it runs, writing/reading them fails. This cached
+// probe lets the scheduler treat a campaign as non-batched (send everything, the
+// existing behaviour) when the columns are absent, so the migration is required
+// only to ENABLE batching — never to keep existing sends working.
+let _hasBatchCols: boolean | undefined;
+async function campaignsHaveBatchCols(): Promise<boolean> {
+  if (_hasBatchCols !== undefined) return _hasBatchCols;
+  const { error } = await supabase.from('campaigns').select('batch_enabled').limit(1);
+  _hasBatchCols = !error;
+  return _hasBatchCols;
+}
+
 // IST (Asia/Kolkata) = UTC+05:30.
 const IST_OFFSET_MS = (5 * 60 + 30) * 60 * 1000;
 
@@ -113,7 +133,7 @@ function logErr(...args: unknown[]) {
   console.error('[Scheduler]', ...args);
 }
 
-// ─── Time helpers (ported verbatim from campaignScheduler.js) ─────────────
+// â”€â”€â”€ Time helpers (ported verbatim from campaignScheduler.js) â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 function parseTime(timeStr: string): { hours: number; minutes: number; seconds: number } | null {
   if (!timeStr) return null;
   const match = String(timeStr).trim().match(/^(\d{1,2}):(\d{2})(?::(\d{2}))?(?:\s*(AM|PM))?$/i);
@@ -298,7 +318,7 @@ async function getCampaignSchedule(campaignId: string): Promise<any | null> {
   return data || null;
 }
 
-// ─── Campaign discovery + atomic claim ─────────────────────────────────────
+// â”€â”€â”€ Campaign discovery + atomic claim â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 /**
  * Find campaigns that are scheduled AND due. Every status='scheduled' campaign
  * is examined together with its campaign_schedules row (see isCampaignDue):
@@ -323,7 +343,7 @@ async function getDueCampaigns(): Promise<any[]> {
       log(`Campaign ${campaign.id} ("${campaign.campaign_name}") is overdue and due`);
       due.push(campaign);
     } else if (campaign.schedule_date || campaign.scheduled_at || schedule) {
-      log(`Campaign ${campaign.id} ("${campaign.campaign_name}") not due yet — skipped`);
+      log(`Campaign ${campaign.id} ("${campaign.campaign_name}") not due yet â€” skipped`);
     }
   }
   return due;
@@ -342,7 +362,7 @@ async function getStuckSendingCampaigns(): Promise<any[]> {
 
 /**
  * Atomically claim a due campaign. Only ONE invocation can transition
- * 'scheduled' → 'sending', so concurrent cron ticks can never double-send.
+ * 'scheduled' â†’ 'sending', so concurrent cron ticks can never double-send.
  */
 async function claimCampaign(id: string): Promise<boolean> {
   const nowIso = new Date().toISOString();
@@ -357,7 +377,7 @@ async function claimCampaign(id: string): Promise<boolean> {
   return data != null;
 }
 
-// ─── Recipient resolution ───────────────────────────────────────────────────
+// â”€â”€â”€ Recipient resolution â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 // Uses the canonical, shared resolver (supabase/functions/_shared/audience.ts)
 // so the count shown in the app's dropdown and the contacts actually emailed by
 // this function come from the EXACT same logic. The resolver:
@@ -366,62 +386,41 @@ async function claimCampaign(id: string): Promise<boolean> {
 //   2. keeps only contacts with a valid, deliverable email,
 //   3. removes duplicate email addresses (case-insensitive).
 
-async function resolveContactsForCampaign(campaignId: string, audienceSegment: string): Promise<any[]> {
-  // ─── Custom Audience List branch ──────────────────────────────────────────
-  // A custom list is identified by its (unique) name. When the segment label
-  // matches a contact_lists.name, the recipients are the list's members,
-  // resolved purely from contact_list_members → contacts (no contact_type
-  // filtering). This keeps custom lists separate from the contact-type system
-  // and is the SAME resolution the send-campaign function + the dropdown use,
-  // so the count and the sent recipients always agree.
-  const segmentName = String(audienceSegment || '').trim();
-  if (segmentName) {
-    const { data: listRow, error: listErr } = await supabase
-      .from('contact_lists')
-      .select('id')
-      .eq('name', segmentName)
-      .maybeSingle();
-    if (listErr && listErr.code !== '42P01') {
-      throw new Error(`Failed to check custom list: ${listErr.message}`);
-    }
-    if (listRow && listRow.id) {
-      const { data: members, error: memErr } = await supabase
-        .from('contact_list_members')
-        .select('contact_id')
-        .eq('list_id', listRow.id);
-      if (memErr) throw new Error(`Failed to fetch list members: ${memErr.message}`);
-      const ids = Array.from(new Set((members || []).map((m: any) => m.contact_id)));
-      let valid: any[] = [];
-      if (ids.length > 0) {
-        const { data: rows, error: cErr } = await supabase
-          .from('contacts')
-          .select('*')
-          .in('id', ids);
-        if (cErr) throw new Error(`Failed to fetch list contacts: ${cErr.message}`);
-        valid = resolveContactListRecipients(rows || []);
-      }
-      if (valid.length > 0) {
-        const { data: existing, error: existingError } = await supabase
-          .from('campaign_contacts')
-          .select('contact_id')
-          .eq('campaign_id', campaignId);
-        if (existingError && existingError.code !== '42P01') {
-          throw new Error(`Failed to fetch existing campaign contacts: ${existingError.message}`);
-        }
-        const existingIds = new Set((existing || []).map((r: any) => r.contact_id));
-        const newRows = valid
-          .filter((c: any) => !existingIds.has(c.id))
-          .map((c: any) => ({ campaign_id: campaignId, contact_id: c.id }));
-        if (newRows.length > 0) {
-          const { error: insertError } = await supabase.from('campaign_contacts').insert(newRows);
-          if (insertError && insertError.code !== '42P01') {
-            throw new Error(`Failed to link campaign contacts: ${insertError.message}`);
-          }
-        }
-      }
-      return valid;
-    }
+/**
+ * Custom contact_list fallback. Only consulted when a segment matched NO
+ * contact_type / company_category (i.e. it is a genuine custom list). A list
+ * with zero members yields zero recipients â€” it NEVER silently falls back to
+ * all contacts.
+ */
+async function resolveCustomListRecipients(segmentName: string): Promise<any[]> {
+  if (!segmentName) return [];
+  const { data: listRow, error: listErr } = await supabase
+    .from('contact_lists')
+    .select('id')
+    .eq('name', segmentName)
+    .maybeSingle();
+  if (listErr && listErr.code !== '42P01') {
+    throw new Error(`Failed to check custom list: ${listErr.message}`);
   }
+  if (!listRow || !listRow.id) return [];
+  const { data: members, error: memErr } = await supabase
+    .from('contact_list_members')
+    .select('contact_id')
+    .eq('list_id', listRow.id);
+  if (memErr) throw new Error(`Failed to fetch list members: ${memErr.message}`);
+  const ids = Array.from(new Set((members || []).map((m: any) => m.contact_id)));
+  if (ids.length === 0) return [];
+  const { data: rows, error: cErr } = await supabase
+    .from('contacts')
+    .select('*')
+    .in('id', ids);
+  if (cErr) throw new Error(`Failed to fetch list contacts: ${cErr.message}`);
+  return resolveContactListRecipients(rows || []);
+}
+
+async function resolveContactsForCampaign(campaignId: string, audienceSegment: string): Promise<any[]> {
+  const segmentName = String(audienceSegment || '').trim();
+  log(`Audience resolve â€” campaign=${campaignId} segment="${segmentName}"`);
 
   // Follow-up rule: a campaign that is configured as a FOLLOW-UP (row in
   // campaign_followups with followup_campaign_id = this campaign) only ever
@@ -457,21 +456,34 @@ async function resolveContactsForCampaign(campaignId: string, audienceSegment: s
       valid = (rows || []).filter((c: any) => isDeliverableRecipientEmail(c.email));
     }
     if (valid.length === 0) {
-      log(`Campaign ${campaignId} is a follow-up of ${sourceCampaignId} — no opened recipients found; 0 recipients.`);
+      log(`Campaign ${campaignId} is a follow-up of ${sourceCampaignId} â€” no opened recipients found; 0 recipients.`);
     }
   } else {
-    // Audience resolution is by segment *category*, not an exact match to the
-    // segment label. Values like "Existing Client (Vatsal/ Shubham)" /
-    // "New Client - Inbound" resolve to their broad categories. The shared
-    // resolver (resolveSegmentRecipients) is the SAME function the frontend uses
-    // to compute the dropdown count, so the two can never diverge.
+    // â”€â”€â”€ SOURCE OF TRUTH: contact_type / company_category â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
+    // The shared resolver (resolveSegmentRecipients) is the SAME function the
+    // Contacts page and the composer dropdown use to compute the audience count,
+    // so the recipients emailed here can never diverge from what the user saw.
+    // A specific segment NEVER expands to the whole audience.
     const { data: contacts, error } = await supabase.from('contacts').select('*');
     if (error) throw new Error(`Failed to fetch contacts: ${error.message}`);
 
-    valid = resolveSegmentRecipients(contacts || [], audienceSegment);
+    const categoryRecipients = resolveSegmentRecipients(contacts || [], segmentName);
+
+    if (categoryRecipients.length > 0) {
+      log(`Audience segment="${segmentName}" â†’ ${categoryRecipients.length} recipient(s) via contact_type/company_category`);
+      log(`Audience resolved contact ids: ${categoryRecipients.map((c: any) => c.id).join(', ')}`);
+      valid = categoryRecipients;
+    } else {
+      // Genuine custom list fallback â€” only when nothing matched by category.
+      // A list with zero members yields zero recipients; it NEVER silently
+      // falls back to all contacts.
+      const listRecipients = await resolveCustomListRecipients(segmentName);
+      log(`Audience segment="${segmentName}" â†’ ${listRecipients.length} recipient(s) via custom list`);
+      valid = listRecipients;
+    }
   }
 
-  // Link resolved contacts to campaign_contacts (idempotent) — keeps the DB
+  // Link resolved contacts to campaign_contacts (idempotent) â€” keeps the DB
   // consistent with what the local worker would have written.
   if (valid.length > 0) {
     const { data: existing, error: existingError } = await supabase
@@ -496,7 +508,7 @@ async function resolveContactsForCampaign(campaignId: string, audienceSegment: s
   return valid;
 }
 
-// ─── email_logs helpers ────────────────────────────────────────────────────
+// â”€â”€â”€ email_logs helpers â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 async function createEmailLogs(campaignId: string, contacts: any[]): Promise<void> {
   if (contacts.length === 0) return;
   const rows = contacts.map((c: any) => ({
@@ -509,7 +521,7 @@ async function createEmailLogs(campaignId: string, contacts: any[]): Promise<voi
   }));
   const { error } = await supabase.from('email_logs').insert(rows);
   if (error) {
-    // email_logs may predate the tracking columns → retry without tracking_id.
+    // email_logs may predate the tracking columns â†’ retry without tracking_id.
     if (error.code === '42703') {
       const { error: err2 } = await supabase.from('email_logs').insert(
         rows.map(({ tracking_id: _t, ...rest }) => rest)
@@ -532,7 +544,7 @@ async function getLogsByCampaign(campaignId: string): Promise<any[]> {
 }
 
 /**
- * Atomically claim the pending email_logs for a campaign (pending → sending).
+ * Atomically claim the pending email_logs for a campaign (pending â†’ sending).
  * Rows returned are the ONLY ones this invocation is allowed to send.
  */
 async function claimPendingLogs(campaignId: string): Promise<any[]> {
@@ -610,7 +622,7 @@ async function getLogsStats(campaignId: string) {
   };
 }
 
-// ─── Analytics sync (ported from emailLogService.syncCampaignAnalytics) ────
+// â”€â”€â”€ Analytics sync (ported from emailLogService.syncCampaignAnalytics) â”€â”€â”€â”€
 async function syncCampaignAnalytics(campaignId: string): Promise<void> {
   const stats = await getLogsStats(campaignId);
   const { error } = await supabase
@@ -641,7 +653,7 @@ async function syncCampaignAnalytics(campaignId: string): Promise<void> {
   }
 }
 
-// ─── Personalization ───────────────────────────────────────────────────────
+// â”€â”€â”€ Personalization â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 // Merge tags resolve against the actual recipient row from public.contacts via
 // the shared _shared/personalization.ts helper (no hard-coded placeholder list).
 function escapeHtml(text: string): string {
@@ -743,7 +755,7 @@ function wrapHtmlDocument(html: string): string {
 /**
  * Rewrites every clickable external URL in the personalized HTML to the
  * click-tracker Edge Function, which records the click on this email_log
- * (tracking_id → clicked/clicked_at) and 302-redirects to the destination.
+ * (tracking_id â†’ clicked/clicked_at) and 302-redirects to the destination.
  *
  * - Existing <a href="http(s)://..."> anchors get their href rewritten.
  * - Bare http(s):// URLs in the text are auto-wrapped in a tracked anchor.
@@ -792,7 +804,7 @@ function appendEdgeTrackingPixel(
     : `${html}\n${pixel}`;
 }
 
-// ─── Minimal SMTP client (Deno → smtp.gmail.com:465, implicit TLS) ─────────
+// â”€â”€â”€ Minimal SMTP client (Deno â†’ smtp.gmail.com:465, implicit TLS) â”€â”€â”€â”€â”€â”€â”€â”€â”€
 function b64EncodeBytes(bytes: Uint8Array): string {
   let bin = '';
   for (let i = 0; i < bytes.length; i++) bin += String.fromCharCode(bytes[i]);
@@ -924,7 +936,7 @@ async function loadCampaignAttachments(campaignId: string): Promise<any[]> {
     .order('created_at', { ascending: true });
   if (error) {
     if (error.code === '42P01') {
-      log('[Campaign Attachment] campaign_attachments table missing (42P01) — sending without attachments');
+      log('[Campaign Attachment] campaign_attachments table missing (42P01) â€” sending without attachments');
       return [];
     }
     throw new Error(`Failed to fetch attachments: ${error.message}`);
@@ -943,7 +955,7 @@ async function downloadAttachment(att: any): Promise<MimeAttachment> {
   const { data, error } = await supabase.storage.from(bucket).download(path);
   if (error || !data) {
     throw new Error(
-      `Failed to download attachment "${att.file_name || path}" from Storage — bucket="${bucket}" path="${path}"${error ? `: ${error.message}` : ' (empty response)'}`
+      `Failed to download attachment "${att.file_name || path}" from Storage â€” bucket="${bucket}" path="${path}"${error ? `: ${error.message}` : ' (empty response)'}`
     );
   }
   const bytes = new Uint8Array(await data.arrayBuffer());
@@ -1014,7 +1026,7 @@ function buildMimeMessage(opts: {
 
   const attachments = opts.attachments || [];
 
-  // No attachments → keep the exact legacy multipart/alternative message.
+  // No attachments â†’ keep the exact legacy multipart/alternative message.
   if (attachments.length === 0) {
     const boundary = `----=_EmailIntelligence_${crypto.randomUUID()}`;
     lines.push(`Content-Type: multipart/alternative; boundary="${boundary}"`);
@@ -1115,7 +1127,7 @@ async function sendSmtp(opts: {
   }
 }
 
-// ─── Per-recipient send (mirrors emailWorker.sendOneEmail) ─────────────────
+// â”€â”€â”€ Per-recipient send (mirrors emailWorker.sendOneEmail) â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 async function fetchCampaignTemplateHtml(templateId: string): Promise<string | null> {
   const { data: tpl, error } = await supabase
     .from('templates')
@@ -1127,7 +1139,7 @@ async function fetchCampaignTemplateHtml(templateId: string): Promise<string | n
     return null;
   }
   if (!tpl) {
-    console.log(`[Template] ${templateId} not found — falling back to stored body.`);
+    console.log(`[Template] ${templateId} not found â€” falling back to stored body.`);
     return null;
   }
   // Prefer the uploaded file in Storage (the true original); fall back to the
@@ -1177,16 +1189,16 @@ async function sendOneEmail(
 
   // Click tracking: rewrite every link to the click-tracker Edge Function,
   // which records clicked/clicked_at on this exact email_log and 302-redirects.
-  // Always applied — the edge function is reachable even when the local
+  // Always applied â€” the edge function is reachable even when the local
   // backend is off, unlike the legacy TRACKING_BASE_URL path.
   let html = rewriteLinksForTracking(personalizedHtml, trackingId, EDGE_FUNCTION_BASE);
-  // Always embed the Supabase Edge Function open pixel — it is reachable even
+  // Always embed the Supabase Edge Function open pixel â€” it is reachable even
   // when the laptop is off and marks this exact email_log opened.
   html = appendEdgeTrackingPixel(html, campaign.id, emailLog.email, trackingId);
   const docHtml = wrapHtmlDocument(toEmailSafeHtml(html));
   const subject = personalizeTemplate(campaign.subject_line || '', contact, emailLog.email);
 
-  // Development-only diagnostics — proves THIS recipient's contact row is the
+  // Development-only diagnostics â€” proves THIS recipient's contact row is the
   // ONLY source of personalization for this email. No credentials are logged.
   log(`[Personalization] recipient=${emailLog.email}`);
   log(`[Personalization] contact_id=${contact.id || emailLog.contact_id || '(none)'}`);
@@ -1196,15 +1208,62 @@ async function sendOneEmail(
   log(`[Personalization] rendered_subject=${String(subject || '').slice(0, 200)}`);
   log(`[Personalization] rendered_body=${stripHtml(personalizedHtml).slice(0, 300)}`);
 
-  log(`Sending ${index}/${total} → ${emailLog.email}`);
+  log(`Sending ${index}/${total} â†’ ${emailLog.email}`);
   const result = await sendSmtp({ to: emailLog.email, subject, html: docHtml, text: plainText, attachments });
   log(`SMTP accepted ${emailLog.email} messageId=${result.messageId}`);
   if (attachments.length > 0) {
-    log(`[Campaign Attachment] Email sent with ${attachments.length} attachment(s) → ${emailLog.email}`);
+    log(`[Campaign Attachment] Email sent with ${attachments.length} attachment(s) â†’ ${emailLog.email}`);
   }
 }
 
-// ─── Campaign processing (mirrors emailWorker.processCampaign) ─────────────
+// â”€â”€â”€ Campaign processing (mirrors emailWorker.processCampaign) â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
+async function sendClaimedBatch(
+  campaign: any,
+  contactMap: Map<string, any>,
+  logs: any[],
+  attachments: MimeAttachment[],
+  startIndex: number,
+  total: number
+): Promise<{ sent: number; failed: number }> {
+  let sent = 0;
+  let failed = 0;
+  for (let i = 0; i < logs.length; i++) {
+    const logRow = logs[i];
+    try {
+      if (EMAIL_DELAY_MS > 0 && i > 0) {
+        await new Promise((r) => setTimeout(r, EMAIL_DELAY_MS));
+      }
+      await sendOneEmail(logRow, campaign, contactMap, startIndex + i, total, attachments);
+      await updateEmailLog(logRow.id, { status: 'sent', sent_at: new Date().toISOString() });
+      sent++;
+    } catch (error) {
+      const message = error instanceof Error ? error.message : String(error);
+      const retryCount = (logRow.retry_count || 0) + 1;
+      if (retryCount > MAX_RETRIES) {
+        await updateEmailLog(logRow.id, {
+          status: 'failed',
+          error_message: `[SEND_FAILED] ${message}`,
+          retry_count: retryCount,
+          last_attempt_at: new Date().toISOString(),
+        });
+        failed++;
+        logErr(`FAILED ${logRow.email} (permanent): ${message}`);
+      } else {
+        const delaySec = RETRY_DELAYS[retryCount - 1];
+        await updateEmailLog(logRow.id, {
+          status: 'pending',
+          retry_count: retryCount,
+          last_attempt_at: new Date().toISOString(),
+          next_retry_at: new Date(Date.now() + delaySec * 1000).toISOString(),
+          error_message: `[SEND_FAILED] ${message}`,
+        });
+        logErr(`Retry ${retryCount} scheduled for ${logRow.email} in ${delaySec}s: ${message}`);
+      }
+    }
+  }
+  return { sent, failed };
+}
+
 async function processCampaign(campaignId: string): Promise<{ sent: number; failed: number; total: number }> {
   const claimTimeIso = new Date().toISOString();
   await supabase.from('campaigns').update({ updated_at: claimTimeIso }).eq('id', campaignId);
@@ -1222,11 +1281,23 @@ async function processCampaign(campaignId: string): Promise<{ sent: number; fail
     const contacts = await resolveContactsForCampaign(campaignId, campaign.audience_segment);
     log(`Campaign ${campaignId} resolved ${contacts.length} recipient(s)`);
 
+    // ─── SEND-TIME SAFETY CHECK (required verification) ──────────────────
+    // Prove the selected audience_segment maps 1:1 to the contacts actually
+    // emailed. Never send contacts outside the selected contact_type.
+    log(`[SAFETY CHECK] campaign_id=${campaignId}`);
+    log(`[SAFETY CHECK] Audience: ${campaign.audience_segment}`);
+    log(`[SAFETY CHECK] Recipients: ${contacts.length}`);
+    log(
+      `[SAFETY CHECK] Emails:\n${
+        (contacts as any[]).map((c: any) => String(c.email || '')).join('\n') || '(none)'
+      }`
+    );
+
     // Zero-recipient safety: nothing to send. Mark the campaign "failed" (with
     // a clear reason) so it never falsely reports "sent" and never re-fires on
     // every cron tick. Follow-ups with no openers land here too.
     if (contacts.length === 0) {
-      log(`Campaign ${campaignId} ("${campaign.campaign_name}") has 0 deliverable recipients — NOT sending.`);
+      log(`Campaign ${campaignId} ("${campaign.campaign_name}") has 0 deliverable recipients â€” NOT sending.`);
       log(`Marking campaign ${campaignId} as "failed" (0 recipients).`);
       await finalizeCampaign(campaignId, { status: 'failed', recipient_count: 0 });
       return { sent: 0, failed: 0, total: 0 };
@@ -1234,19 +1305,19 @@ async function processCampaign(campaignId: string): Promise<{ sent: number; fail
 
     // Load + download the campaign's attachments once so every recipient gets the
     // same files without re-reading Storage per email. A file that cannot be
-    // downloaded aborts the campaign with a clear error — never silently send
+    // downloaded aborts the campaign with a clear error â€” never silently send
     // an email without its attachment.
     let mimeAttachments: MimeAttachment[];
     try {
       mimeAttachments = await loadAndDownloadAttachments(campaignId);
     } catch (error) {
       const message = error instanceof Error ? error.message : String(error);
-      logErr(`Campaign ${campaignId} aborted — ${message}`);
+      logErr(`Campaign ${campaignId} aborted â€” ${message}`);
       await finalizeCampaign(campaignId, { status: 'failed', recipient_count: contacts.length });
       throw new Error(`Campaign ${campaignId} could not attach its files: ${message}`, { cause: error });
     }
 
-    // Ensure one email_log per recipient (idempotent — never duplicates).
+    // Ensure one email_log per recipient (idempotent â€” never duplicates).
     const existingLogs = await getLogsByCampaign(campaignId);
     const alreadyQueued = new Set(existingLogs.map((l: any) => l.contact_id));
     const newContacts = contacts.filter((c: any) => !alreadyQueued.has(c.id));
@@ -1254,16 +1325,77 @@ async function processCampaign(campaignId: string): Promise<{ sent: number; fail
 
     const contactMap = new Map(contacts.map((c: any) => [c.id, c]));
 
-    // Drain pending logs in batches, respecting the invocation time budget.
-    const start = Date.now();
+    // ── Batch / throttled sending configuration ──
+    // When OFF (the default, and when the migration columns are absent) the
+    // campaign behaves exactly as before: every eligible recipient is drained.
+    const batchCols = await campaignsHaveBatchCols();
+    const batchEnabled = batchCols && campaign.batch_enabled === true;
+    const batchSize = batchEnabled ? Math.max(1, Number(campaign.batch_size) || 30) : MAX_EMAILS_PER_RUN;
+    const batchIntervalMs = batchEnabled
+      ? Math.max(1, Number(campaign.batch_interval_minutes) || 60) * 60000
+      : 0;
     let sent = 0;
     let failed = 0;
+
+    if (batchEnabled) {
+      // ONE batch per worker run. The claimed email_logs are pinned to 'sending'
+      // atomically (claimPendingLogsLimited) so a concurrent cron tick — which
+      // lost the campaign claim — can never re-send them. When recipients remain,
+      // the campaign returns to "scheduled" with scheduled_at set to the NEXT
+      // batch's IST wall-clock time, so the cron only re-claims it once that time
+      // arrives. This survives a closed browser, a stopped backend, and restarts.
+      const currentBatch = (Number(campaign.current_batch_number) || 0) + 1;
+      const claimed = await claimPendingLogsLimited(supabase, campaignId, currentBatch, batchSize);
+      if (claimed.length > 0) {
+        const res = await sendClaimedBatch(campaign, contactMap, claimed, mimeAttachments, 1, contacts.length);
+        sent = res.sent;
+        failed = res.failed;
+      }
+      const statsNow = await getLogsStats(campaignId);
+      try {
+        await syncCampaignAnalytics(campaignId);
+      } catch (analyticsError) {
+        logErr(`Analytics sync failed (non-fatal): ${(analyticsError as Error).message}`);
+      }
+      if (statsNow.pending > 0) {
+        const nextAtMs = Date.now() + batchIntervalMs;
+        const nextIso = new Date(nextAtMs).toISOString();
+        const totalBatches = Math.max(1, computeTotalBatches(statsNow.total, batchSize));
+        await finalizeCampaign(campaignId, {
+          status: 'scheduled',
+          current_batch_number: currentBatch,
+          total_batches: totalBatches,
+          next_batch_at: nextIso,
+          scheduled_at: nextIso,
+          schedule_date: utcToIstDateStr(nextAtMs),
+          schedule_time: utcToIstTimeStr(nextAtMs),
+          recipient_count: statsNow.total,
+        });
+        // Keep any recurring schedule aligned with the throttled cadence.
+        const { error: schedErr } = await supabase
+          .from('campaign_schedules')
+          .update({ next_run: nextIso, last_run: new Date().toISOString() })
+          .eq('campaign_id', campaignId);
+        if (schedErr && schedErr.code !== '42P01') {
+          logErr(`Failed to advance schedule for batch ${campaignId}: ${schedErr.message}`);
+        }
+        log(
+          `Batch ${currentBatch}/${totalBatches} sent (${sent} sent, ${failed} failed) for campaign ${campaignId}. ` +
+          `Next batch at ${nextIso} (${utcToIstDateStr(nextAtMs)} ${utcToIstTimeStr(nextAtMs)} IST).`
+        );
+        return { sent, failed, total: statsNow.total };
+      }
+      // No recipients remain → fall through to the shared finalize block below.
+    }
+
+    // Drain pending logs in batches, respecting the invocation time budget.
+    const start = Date.now();
     let budgetHit = false;
 
     while (sent + failed < MAX_EMAILS_PER_RUN) {
       if (Date.now() - start > TIME_BUDGET_MS) {
         budgetHit = true;
-        log(`Time budget reached — pausing campaign ${campaignId}; next cron tick will continue.`);
+        log(`Time budget reached â€” pausing campaign ${campaignId}; next cron tick will continue.`);
         break;
       }
       const batch = await claimPendingLogs(campaignId);
@@ -1271,7 +1403,7 @@ async function processCampaign(campaignId: string): Promise<{ sent: number; fail
 
       const total = contacts.length;
       for (let i = 0; i < batch.length; i++) {
-        // Re-check the budget inside the loop too — a large claimed batch must
+        // Re-check the budget inside the loop too â€” a large claimed batch must
         // never push this invocation past the free-tier wall-clock limit.
         if (Date.now() - start > TIME_BUDGET_MS) { budgetHit = true; break; }
         if (sent + failed >= MAX_EMAILS_PER_RUN) { budgetHit = true; break; }
@@ -1315,8 +1447,8 @@ async function processCampaign(campaignId: string): Promise<{ sent: number; fail
     await releaseClaimedLogs(campaignId, claimTimeIso);
 
     // Finalize. A campaign is only "sent" when every recipient is drained
-    // (all logs 'sent' or 'failed'). If recipients still remain pending — e.g.
-    // the per-run budget was hit, or a recipient is waiting on a retry delay —
+    // (all logs 'sent' or 'failed'). If recipients still remain pending â€” e.g.
+    // the per-run budget was hit, or a recipient is waiting on a retry delay â€”
     // the campaign returns to "scheduled" so the next cron tick reclaims it
     // and keeps draining. This never orphans pending logs.
     const stats = await getLogsStats(campaignId);
@@ -1330,13 +1462,13 @@ async function processCampaign(campaignId: string): Promise<{ sent: number; fail
         status: 'scheduled',
       });
       log(
-        `Campaign ${campaignId} still has ${stats.pending} pending recipient(s) — ` +
+        `Campaign ${campaignId} still has ${stats.pending} pending recipient(s) â€” ` +
         `returned to "scheduled" so the next cron tick continues.`
       );
     } else {
       // Recurring advance: an active weekly/monthly schedule with a next
       // occurrence keeps the campaign "scheduled" (next_run advanced) instead
-      // of marking it "sent" — the cron tick picks it up again next occurrence.
+      // of marking it "sent" â€” the cron tick picks it up again next occurrence.
       const schedule = await getCampaignSchedule(campaignId);
       const isRecurring =
         schedule && (schedule.schedule_type === 'weekly' || schedule.schedule_type === 'monthly');
@@ -1353,12 +1485,12 @@ async function processCampaign(campaignId: string): Promise<{ sent: number; fail
           }
           await finalizeCampaign(campaignId, { status: 'scheduled' });
           log(
-            `Campaign ${campaignId} recurring — ${stats.delivered} delivered this occurrence; ` +
+            `Campaign ${campaignId} recurring â€” ${stats.delivered} delivered this occurrence; ` +
             `advanced to next run ${next.toISOString()} and kept "scheduled".`
           );
           return { sent, failed, total: stats.total };
         }
-        log(`Campaign ${campaignId} recurring schedule has no further occurrence — finalizing "sent".`);
+        log(`Campaign ${campaignId} recurring schedule has no further occurrence â€” finalizing "sent".`);
       }
       const delivered = Number(stats.delivered) || 0;
       if (delivered > 0) {
@@ -1369,13 +1501,13 @@ async function processCampaign(campaignId: string): Promise<{ sent: number; fail
         });
         log(`Campaign ${campaignId} marked "sent" (${delivered} delivered / ${stats.total} total)`);
       } else {
-        // Every recipient permanently failed — honest status instead of a fake
+        // Every recipient permanently failed â€” honest status instead of a fake
         // "sent" with zero deliveries.
         await finalizeCampaign(campaignId, {
           status: 'failed',
           recipient_count: stats.total,
         });
-        logErr(`Campaign ${campaignId} marked "failed" — 0 delivered of ${stats.total} recipient(s).`);
+        logErr(`Campaign ${campaignId} marked "failed" â€” 0 delivered of ${stats.total} recipient(s).`);
       }
     }
     return { sent, failed, total: stats.total };
@@ -1404,12 +1536,12 @@ async function processCampaign(campaignId: string): Promise<{ sent: number; fail
   }
 }
 
-// ─── Main entry ────────────────────────────────────────────────────────────
+// â”€â”€â”€ Main entry â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 Deno.serve(async (req: Request) => {
   const start = Date.now();
   const secret = req.headers.get('x-cron-secret') || '';
   if (!CRON_SECRET || secret !== CRON_SECRET) {
-    logErr('Unauthorized — missing/invalid x-cron-secret header');
+    logErr('Unauthorized â€” missing/invalid x-cron-secret header');
     return new Response(JSON.stringify({ success: false, error: 'Unauthorized' }), {
       status: 401,
       headers: { 'Content-Type': 'application/json' },
@@ -1428,7 +1560,7 @@ Deno.serve(async (req: Request) => {
       try {
         const claimed = await claimCampaign(campaign.id);
         if (!claimed) {
-          log(`Campaign ${campaign.id} already claimed — skipping`);
+          log(`Campaign ${campaign.id} already claimed â€” skipping`);
           continue;
         }
         log(`Claiming campaign ${campaign.id} ("${campaign.campaign_name}")`);
@@ -1454,7 +1586,7 @@ Deno.serve(async (req: Request) => {
       }
     }
 
-    log(`Done in ${Date.now() - start}ms — ${summary.processed} campaign(s) processed, ${summary.recovered} recovered`);
+    log(`Done in ${Date.now() - start}ms â€” ${summary.processed} campaign(s) processed, ${summary.recovered} recovered`);
     return new Response(JSON.stringify({ success: true, ...summary }), {
       status: 200,
       headers: { 'Content-Type': 'application/json' },
@@ -1467,3 +1599,4 @@ Deno.serve(async (req: Request) => {
     });
   }
 });
+

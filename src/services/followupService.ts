@@ -38,17 +38,32 @@ function normalizeEmail(email?: string | null): string {
   return String(email || '').trim().toLowerCase()
 }
 
-async function extractFunctionError(error: unknown): Promise<string> {
-  const context = (error as { context?: Response }).context
-  if (context && typeof context.json === 'function') {
+async function extractFunctionError(functionName: string, error: unknown): Promise<string> {
+  const err = error as { context?: Response; status?: number }
+  const status = err?.status ?? err?.context?.status
+  const isAuthError = status === 401 || status === 403
+  if (err?.context && typeof err.context.json === 'function') {
     try {
-      const body = (await context.json()) as { error?: string } | null
-      if (body?.error) return body.error
+      const body = (await err.context.json()) as { error?: string; message?: string } | null
+      const detail = body?.error || body?.message
+      if (detail) {
+        if (isAuthError) {
+          return `${functionName}: authorization failed (HTTP ${status}) — ${detail}`
+        }
+        return `${functionName}: ${detail}`
+      }
     } catch {
       // Response body not JSON — fall through to the generic message.
     }
   }
-  return error instanceof Error ? error.message : 'Failed to send follow-up'
+  if (isAuthError) {
+    return (
+      `${functionName}: authorization failed (HTTP ${status ?? '?'}). ` +
+      `The '${functionName}' Edge Function requires 'verify_jwt = false' in ` +
+      `supabase/config.toml (it is invoked from the browser with the anon key).`
+    )
+  }
+  return `${functionName}: ${error instanceof Error ? error.message : 'request failed'}`
 }
 
 // ─── Per-campaign config (campaign_followups) ──────────────────────────────
@@ -989,7 +1004,7 @@ async function sendSelectedFollowups(
       followup_campaign_id: payload.followup_campaign_id,
     },
   })
-  if (error) throw new Error(await extractFunctionError(error))
+  if (error) throw new Error(await extractFunctionError('send-followup', error))
   const body = data as
     | { success?: boolean; data?: SendSelectedFollowupResult[]; error?: { message?: string } }
     | null
@@ -1003,7 +1018,7 @@ async function sendPendingFollowup(id: string): Promise<{ id: string; status: st
   const { data, error } = await supabase.functions.invoke('send-followup', {
     body: { action: 'send_pending', pending_id: id },
   })
-  if (error) throw new Error(await extractFunctionError(error))
+  if (error) throw new Error(await extractFunctionError('send-followup', error))
   const body = data as
     | { success?: boolean; data?: { id: string; status: string }; error?: { message?: string } }
     | null
@@ -1032,7 +1047,7 @@ async function processAutomaticFollowup(
       followup_campaign_id: config.followup_campaign_id,
     },
   })
-  if (error) throw new Error(await extractFunctionError(error))
+  if (error) throw new Error(await extractFunctionError('send-followup', error))
   const body = data as
     | { success?: boolean; data?: { sent: number; skipped: number; failed: number }; error?: { message?: string } }
     | null

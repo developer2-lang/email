@@ -49,6 +49,12 @@ import {
   resolveContactListRecipients,
   isDeliverableRecipientEmail,
 } from '../_shared/audience.ts';
+import {
+  claimPendingLogsLimited,
+  computeTotalBatches,
+  utcToIstDateStr,
+  utcToIstTimeStr,
+} from '../_shared/batch.ts';
 
 const supabaseUrl = Deno.env.get('SUPABASE_URL')!;
 const supabaseKey =
@@ -75,6 +81,20 @@ const MAX_EMAILS_PER_RUN = Math.max(1, parseInt(Deno.env.get('MAX_EMAILS_PER_RUN
 const TIME_BUDGET_MS = Math.max(1000, parseInt(Deno.env.get('TIME_BUDGET_MS') || '100000', 10));
 const RETRY_DELAYS = [30, 60, 120]; // seconds — matches the backend worker
 const MAX_RETRIES = RETRY_DELAYS.length;
+
+// ─── Column-presence guard (graceful rollout) ───────────────────────────────
+// The campaigns.batch_* columns + email_logs.batch_number are added by the
+// batching migration. Until it runs, writing/reading them fails. This cached
+// probe lets Send Now treat a campaign as non-batched (send everything, the
+// existing behaviour) when the columns are absent, so the migration is required
+// only to ENABLE batching — never to keep existing sends working.
+let _hasBatchCols: boolean | undefined;
+async function campaignsHaveBatchCols(): Promise<boolean> {
+  if (_hasBatchCols !== undefined) return _hasBatchCols;
+  const { error } = await supabase.from('campaigns').select('batch_enabled').limit(1);
+  _hasBatchCols = !error;
+  return _hasBatchCols;
+}
 
 // IST (Asia/Kolkata) = UTC+05:30.
 const IST_OFFSET_MS = (5 * 60 + 30) * 60 * 1000;
@@ -217,6 +237,10 @@ interface CampaignPayload {
     storage_bucket?: string;
     storage_path?: string;
   }>;
+  // ── Batch / throttled sending ──
+  batch_enabled?: boolean | null;
+  batch_size?: number | null;
+  batch_interval_minutes?: number | null;
 }
 
 function buildCampaignRecord(data: CampaignPayload, status: string) {
@@ -244,6 +268,10 @@ function buildCampaignRecord(data: CampaignPayload, status: string) {
     schedule_date: data.schedule_date ? String(data.schedule_date).trim() : null,
     schedule_time: data.schedule_time ? String(data.schedule_time).trim() : null,
     status,
+    batch_enabled: data.batch_enabled ?? false,
+    batch_size: data.batch_size != null ? Math.max(1, Number(data.batch_size) || 30) : 30,
+    batch_interval_minutes:
+      data.batch_interval_minutes != null ? Math.max(1, Number(data.batch_interval_minutes) || 60) : 60,
   };
 }
 
@@ -254,6 +282,14 @@ async function saveCampaignRecord(record: Record<string, unknown>): Promise<any>
   // Omit template_id until the migration adding the column has been applied.
   if (!(await campaignsHaveTemplateId())) {
     delete base.template_id;
+  }
+
+  // Omit the batch_* columns until the batching migration has been applied — but
+  // keep batching DISABLED (default) regardless, so existing sends are unaffected.
+  if (!(await campaignsHaveBatchCols())) {
+    delete base.batch_enabled;
+    delete base.batch_size;
+    delete base.batch_interval_minutes;
   }
 
   if (id) {
@@ -319,66 +355,41 @@ async function saveCampaignAttachments(campaignId: string, attachments?: unknown
 //   2. keeps only contacts with a valid, deliverable email,
 //   3. removes duplicate email addresses (case-insensitive).
 
-async function resolveContactsForCampaign(campaignId: string, audienceSegment: string): Promise<any[]> {
-  // ─── Custom Audience List branch ──────────────────────────────────────────
-  // A custom list is identified by its (unique) name. When the segment label
-  // matches a contact_lists.name, the recipients are the list's members,
-  // resolved purely from contact_list_members → contacts (no contact_type
-  // filtering). This keeps custom lists separate from the contact-type system.
-  // The stored audience_segment is the human-readable list name; the unique
-  // name constraint guarantees a 1:1 match. Resolution here is what the actual
-  // send uses, so selecting a custom list truly controls the recipients.
-  const segmentName = String(audienceSegment || '').trim();
-  if (segmentName) {
-    const { data: listRow, error: listErr } = await supabase
-      .from('contact_lists')
-      .select('id')
-      .eq('name', segmentName)
-      .maybeSingle();
-    if (listErr && listErr.code !== '42P01') {
-      throw new Error(`Failed to check custom list: ${listErr.message}`);
-    }
-    if (listRow && listRow.id) {
-      const { data: members, error: memErr } = await supabase
-        .from('contact_list_members')
-        .select('contact_id')
-        .eq('list_id', listRow.id);
-      if (memErr) throw new Error(`Failed to fetch list members: ${memErr.message}`);
-      const ids = Array.from(new Set((members || []).map((m: any) => m.contact_id)));
-      let valid: any[] = [];
-      if (ids.length > 0) {
-        const { data: rows, error: cErr } = await supabase
-          .from('contacts')
-          .select('*')
-          .in('id', ids);
-        if (cErr) throw new Error(`Failed to fetch list contacts: ${cErr.message}`);
-        // Same valid-email + dedup rules as the category path so the count the
-        // dropdown shows for a custom list equals the recipients actually sent.
-        valid = resolveContactListRecipients(rows || []);
-      }
-      // Link resolved contacts to campaign_contacts (idempotent).
-      if (valid.length > 0) {
-        const { data: existing, error: existingError } = await supabase
-          .from('campaign_contacts')
-          .select('contact_id')
-          .eq('campaign_id', campaignId);
-        if (existingError && existingError.code !== '42P01') {
-          throw new Error(`Failed to fetch existing campaign contacts: ${existingError.message}`);
-        }
-        const existingIds = new Set((existing || []).map((r: any) => r.contact_id));
-        const newRows = valid
-          .filter((c: any) => !existingIds.has(c.id))
-          .map((c: any) => ({ campaign_id: campaignId, contact_id: c.id }));
-        if (newRows.length > 0) {
-          const { error: insertError } = await supabase.from('campaign_contacts').insert(newRows);
-          if (insertError && insertError.code !== '42P01') {
-            throw new Error(`Failed to link campaign contacts: ${insertError.message}`);
-          }
-        }
-      }
-      return valid;
-    }
+/**
+ * Custom contact_list fallback. Only consulted when a segment matched NO
+ * contact_type / company_category (i.e. it is a genuine custom list). A list
+ * with zero members yields zero recipients — it NEVER silently falls back to
+ * all contacts.
+ */
+async function resolveCustomListRecipients(segmentName: string): Promise<any[]> {
+  if (!segmentName) return [];
+  const { data: listRow, error: listErr } = await supabase
+    .from('contact_lists')
+    .select('id')
+    .eq('name', segmentName)
+    .maybeSingle();
+  if (listErr && listErr.code !== '42P01') {
+    throw new Error(`Failed to check custom list: ${listErr.message}`);
   }
+  if (!listRow || !listRow.id) return [];
+  const { data: members, error: memErr } = await supabase
+    .from('contact_list_members')
+    .select('contact_id')
+    .eq('list_id', listRow.id);
+  if (memErr) throw new Error(`Failed to fetch list members: ${memErr.message}`);
+  const ids = Array.from(new Set((members || []).map((m: any) => m.contact_id)));
+  if (ids.length === 0) return [];
+  const { data: rows, error: cErr } = await supabase
+    .from('contacts')
+    .select('*')
+    .in('id', ids);
+  if (cErr) throw new Error(`Failed to fetch list contacts: ${cErr.message}`);
+  return resolveContactListRecipients(rows || []);
+}
+
+async function resolveContactsForCampaign(campaignId: string, audienceSegment: string): Promise<any[]> {
+  const segmentName = String(audienceSegment || '').trim();
+  log(`Audience resolve — campaign=${campaignId} segment="${segmentName}"`);
 
   // Follow-up rule: a campaign configured as a FOLLOW-UP (row in
   // campaign_followups with followup_campaign_id = this campaign) only ever
@@ -417,15 +428,28 @@ async function resolveContactsForCampaign(campaignId: string, audienceSegment: s
       log(`Campaign ${campaignId} is a follow-up of ${sourceCampaignId} — no opened recipients found; 0 recipients.`);
     }
   } else {
-    // Audience resolution is by segment *category*, not an exact match to the
-    // segment label. Values like "Existing Client (Vatsal/ Shubham)" /
-    // "New Client - Inbound" resolve to their broad categories. The shared
-    // resolver (resolveSegmentRecipients) is the SAME function the frontend uses
-    // to compute the dropdown count, so the two can never diverge.
+    // ─── SOURCE OF TRUTH: contact_type / company_category ────────────────────
+    // The shared resolver (resolveSegmentRecipients) is the SAME function the
+    // Contacts page and the composer dropdown use to compute the audience count,
+    // so the recipients emailed here can never diverge from what the user saw.
+    // A specific segment NEVER expands to the whole audience.
     const { data: contacts, error } = await supabase.from('contacts').select('*');
     if (error) throw new Error(`Failed to fetch contacts: ${error.message}`);
 
-    valid = resolveSegmentRecipients(contacts || [], audienceSegment);
+    const categoryRecipients = resolveSegmentRecipients(contacts || [], segmentName);
+
+    if (categoryRecipients.length > 0) {
+      log(`Audience segment="${segmentName}" → ${categoryRecipients.length} recipient(s) via contact_type/company_category`);
+      log(`Audience resolved contact ids: ${categoryRecipients.map((c: any) => c.id).join(', ')}`);
+      valid = categoryRecipients;
+    } else {
+      // Genuine custom list fallback — only when nothing matched by category.
+      // A list with zero members yields zero recipients; it NEVER silently
+      // falls back to all contacts.
+      const listRecipients = await resolveCustomListRecipients(segmentName);
+      log(`Audience segment="${segmentName}" → ${listRecipients.length} recipient(s) via custom list`);
+      valid = listRecipients;
+    }
   }
 
   // Link resolved contacts to campaign_contacts (idempotent).
@@ -1151,6 +1175,61 @@ async function sendOneEmail(
 }
 
 // ─── Campaign processing (mirrors the scheduler's processCampaign) ─────────
+
+/**
+ * Send a SPECIFIC set of already-claimed email_log rows (one batch). Mirrors the
+ * exact per-recipient retry semantics of the legacy drain loop so a transient
+ * failure is retried (back to 'pending' with next_retry_at) and a permanent one
+ * is marked 'failed' — never silently dropped, never re-mailed to a contact that
+ * already succeeded. `startIndex` is only used for cosmetic logging position.
+ */
+async function sendClaimedBatch(
+  campaign: any,
+  contactMap: Map<string, any>,
+  logs: any[],
+  attachments: MimeAttachment[],
+  startIndex: number,
+  total: number
+): Promise<{ sent: number; failed: number }> {
+  let sent = 0;
+  let failed = 0;
+  for (let i = 0; i < logs.length; i++) {
+    const logRow = logs[i];
+    try {
+      if (EMAIL_DELAY_MS > 0 && i > 0) {
+        await new Promise((r) => setTimeout(r, EMAIL_DELAY_MS));
+      }
+      await sendOneEmail(logRow, campaign, contactMap, startIndex + i, total, attachments);
+      await updateEmailLog(logRow.id, { status: 'sent', sent_at: new Date().toISOString() });
+      sent++;
+    } catch (error) {
+      const message = error instanceof Error ? error.message : String(error);
+      const retryCount = (logRow.retry_count || 0) + 1;
+      if (retryCount > MAX_RETRIES) {
+        await updateEmailLog(logRow.id, {
+          status: 'failed',
+          error_message: `[SEND_FAILED] ${message}`,
+          retry_count: retryCount,
+          last_attempt_at: new Date().toISOString(),
+        });
+        failed++;
+        logErr(`FAILED ${logRow.email} (permanent): ${message}`);
+      } else {
+        const delaySec = RETRY_DELAYS[retryCount - 1];
+        await updateEmailLog(logRow.id, {
+          status: 'pending',
+          retry_count: retryCount,
+          last_attempt_at: new Date().toISOString(),
+          next_retry_at: new Date(Date.now() + delaySec * 1000).toISOString(),
+          error_message: `[SEND_FAILED] ${message}`,
+        });
+        logErr(`Retry ${retryCount} scheduled for ${logRow.email} in ${delaySec}s: ${message}`);
+      }
+    }
+  }
+  return { sent, failed };
+}
+
 async function processCampaign(
   campaignId: string,
   contactsHint: any[]
@@ -1169,6 +1248,18 @@ async function processCampaign(
     ? contactsHint
     : await resolveContactsForCampaign(campaignId, campaign.audience_segment);
   log(`Campaign ${campaignId} resolved ${contacts.length} recipient(s)`);
+
+  // ─── SEND-TIME SAFETY CHECK (required verification) ──────────────────────
+  // Prove the selected audience_segment maps 1:1 to the contacts actually
+  // emailed. Never send contacts outside the selected contact_type.
+  log(`[SAFETY CHECK] campaign_id=${campaignId}`);
+  log(`[SAFETY CHECK] Audience: ${campaign.audience_segment}`);
+  log(`[SAFETY CHECK] Recipients: ${contacts.length}`);
+  log(
+    `[SAFETY CHECK] Emails:\n${
+      contacts.map((c: any) => String(c.email || '')).join('\n') || '(none)'
+    }`
+  );
 
   // Load + download the campaign's attachments once so every recipient gets
   // the same files without re-reading Storage per email. A file that cannot be
@@ -1200,10 +1291,69 @@ async function processCampaign(
 
   const contactMap = new Map(contacts.map((c: any) => [c.id, c]));
 
-  // Drain pending logs within the invocation time budget.
-  const start = Date.now();
+  // ── Batch / throttled sending configuration ──
+  // When OFF (the default, and when the migration columns are absent) Send Now
+  // behaves exactly as before: the whole list is drained this invocation.
+  const batchCols = await campaignsHaveBatchCols();
+  const batchEnabled = batchCols && campaign.batch_enabled === true;
+  const batchSize = batchEnabled ? Math.max(1, Number(campaign.batch_size) || 30) : MAX_EMAILS_PER_RUN;
+  const batchIntervalMs = batchEnabled
+    ? Math.max(1, Number(campaign.batch_interval_minutes) || 60) * 60000
+    : 0;
   let sent = 0;
   let failed = 0;
+
+  if (batchEnabled) {
+    // ONE batch now; the rest are handed to scheduled-campaign-runner. We return
+    // the campaign to "scheduled" with scheduled_at set to the next batch's IST
+    // wall-clock time, so the cloud cron picks it up automatically — Send Now's
+    // subsequent batches need no open browser/backend. The batch claim is atomic,
+    // so a concurrent worker can never double-send a recipient.
+    const currentBatch = (Number(campaign.current_batch_number) || 0) + 1;
+    const claimed = await claimPendingLogsLimited(supabase, campaignId, currentBatch, batchSize);
+    if (claimed.length > 0) {
+      const res = await sendClaimedBatch(campaign, contactMap, claimed, mimeAttachments, 1, contacts.length);
+      sent = res.sent;
+      failed = res.failed;
+    }
+    const statsNow = await getLogsStats(campaignId);
+    try {
+      await syncCampaignAnalytics(campaignId);
+    } catch (analyticsError) {
+      logErr(`Analytics sync failed (non-fatal): ${(analyticsError as Error).message}`);
+    }
+    if (statsNow.pending > 0) {
+      const nextAtMs = Date.now() + batchIntervalMs;
+      const nextIso = new Date(nextAtMs).toISOString();
+      const totalBatches = Math.max(1, computeTotalBatches(statsNow.total, batchSize));
+      await finalizeCampaign(campaignId, {
+        status: 'scheduled',
+        current_batch_number: currentBatch,
+        total_batches: totalBatches,
+        next_batch_at: nextIso,
+        scheduled_at: nextIso,
+        schedule_date: utcToIstDateStr(nextAtMs),
+        schedule_time: utcToIstTimeStr(nextAtMs),
+        recipient_count: statsNow.total,
+      });
+      const { error: schedErr } = await supabase
+        .from('campaign_schedules')
+        .update({ next_run: nextIso, last_run: new Date().toISOString() })
+        .eq('campaign_id', campaignId);
+      if (schedErr && schedErr.code !== '42P01') {
+        logErr(`Failed to advance schedule for batch ${campaignId}: ${schedErr.message}`);
+      }
+      log(
+        `Batch ${currentBatch}/${totalBatches} sent (${sent} sent, ${failed} failed) for campaign ${campaignId}. ` +
+        `Remaining batches handed to the cloud scheduler; next at ${nextIso}.`
+      );
+      return { sent, failed, total: statsNow.total, handedOff: true, status: 'scheduled' };
+    }
+    // No recipients remain → fall through to the existing Send Now finalize.
+  }
+
+  // Drain pending logs within the invocation time budget.
+  const start = Date.now();
 
   while (sent + failed < MAX_EMAILS_PER_RUN) {
     if (Date.now() - start > TIME_BUDGET_MS) {

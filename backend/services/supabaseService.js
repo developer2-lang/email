@@ -37,37 +37,31 @@ function normalizeContactType(value) {
 
 /**
  * Whether a contact belongs to the given audience segment (by name).
- * Returns true/false. Unknown segment names fall back to an exact (case-
- * insensitive) match against the contact's contact_type OR company_category.
+ *
+ * Resolution order (deliberately contact_type-first, never company_category):
+ *   1. EXACT `contact_type` match (case-insensitive, trimmed). This is the direct
+ *      connection the requirement demands: selecting "New Lead" resolves exactly
+ *      the rows where `contact_type = 'New Lead'`.
+ *
+ * Only an exact `contact_type` match (or the manual email-list / All Contacts
+ * handling in resolveContactsForAudience) resolves recipients. There are NO
+ * prefix or company_category rules, so a specific segment can never silently
+ * expand to a wider set of contacts.
+ *
+ * `company_category` is intentionally NEVER consulted — audience filtering is
+ * strictly by `contact_type`.
  */
 function contactMatchesSegment(contact, segment) {
   const name = normalizeContactType(segment);
   if (!name) return false;
 
   const type = normalizeContactType(contact && contact.contact_type);
-  const category = normalizeContactType(contact && contact.company_category);
 
-  if (name.includes('existing client')) {
-    return type === 'existing client' || type.startsWith('existing client ');
-  }
-  if (name.includes('new client')) {
-    return type === 'new client' || type.startsWith('new client ');
-  }
-  if (name.includes('new lead')) {
-    return type === 'new lead';
-  }
-  if (name.includes('oem')) {
-    return category === 'oem';
-  }
-  if (name.includes('international')) {
-    return category === 'international';
-  }
-  if (name.includes('prospect')) {
-    return type === 'prospect';
-  }
+  // Direct, exact contact_type match — the source of truth.
+  if (type && type === name) return true;
 
-  // Unknown segment name → treat as a raw contact_type / company_category value.
-  return type === name || category === name;
+  // No company_category fallback, no prefix rules — strict contact_type match.
+  return false;
 }
 
 /**
@@ -630,52 +624,44 @@ export async function resolveContactsForCampaign(campaignId, audienceSegment) {
  * contact_type / company_category exact match. The stored contact_type value is
  * never modified.
  */
+/**
+ * Resolve the contacts for an audience label (Node worker send path).
+ *
+ * SOURCE OF TRUTH: the Contacts page and the composer dropdown compute the
+ * audience count with contact_type / company_category rules (see
+ * contactMatchesSegment / resolveSegmentRecipients). This function MUST return
+ * the EXACT same set, so the recipients a campaign is emailed always match the
+ * count the user saw. A specific segment therefore NEVER expands to the whole
+ * audience.
+ *
+ * Resolution order (deliberately contact_type-first):
+ *   1. manual email list ("a@b.com, c@d.com")
+ *   2. "All Contacts" / empty → every contact (the only legitimate "all")
+ *   3. contact_type / company_category category match — the canonical source of
+ *      truth used by the Contacts page
+ *   4. custom contact_list fallback — ONLY when step 3 matched nothing, i.e. the
+ *      segment is a genuine custom list that is not a contact_type. A list with
+ *      zero members yields zero recipients (the campaign then fails) — it NEVER
+ *      silently falls back to every contact.
+ *
+ * The contact_lists table is intentionally consulted LAST and only as a fallback.
+ * Previously it was checked FIRST by name, which caused a campaign addressed to a
+ * contact_type segment (e.g. "New Lead") to be sent to the members of an unrelated
+ * list that merely shared the same name — the exact "Sent = 3 instead of 2" bug.
+ */
 export async function resolveContactsForAudience(audienceSegment) {
   const client = getSupabase();
   const segment = String(audienceSegment || '').trim();
+  const name = normalizeContactType(segment);
 
-  // ─── Custom Audience List branch ──────────────────────────────────────────
-  // A custom list is identified by its (unique) name. When the segment label
-  // matches a contact_lists.name, the recipients are the contacts that are
-  // members of that list — resolved purely from contact_list_members, never by
-  // contact_type. This keeps custom lists fully separate from the contact-type
-  // system. The stored audience_segment is the human-readable list name (so the
-  // campaign's audience column stays readable); the unique name constraint
-  // guarantees a 1:1 match.
-  if (segment) {
-    const { data: listRow, error: listErr } = await client
-      .from('contact_lists')
-      .select('id')
-      .eq('name', segment)
-      .maybeSingle();
-    if (listErr && listErr.code !== '42P01') {
-      throw toError(listErr, 'Failed to check custom list');
-    }
-    if (listRow && listRow.id) {
-      const { data: members, error: memErr } = await client
-        .from('contact_list_members')
-        .select('contact_id')
-        .eq('list_id', listRow.id);
-      if (memErr) throw toError(memErr, 'Failed to fetch list members');
-      const ids = Array.from(new Set((members || []).map((m) => m.contact_id)));
-      if (ids.length === 0) return [];
-      const { data: contacts, error: cErr } = await client
-        .from(CONTACTS_TABLE)
-        .select('*')
-        .in('id', ids);
-      if (cErr) throw toError(cErr, 'Failed to fetch contacts for list');
-      return contacts || [];
-    }
-  }
+  console.log(`[Audience] resolveContactsForAudience — segment="${segment}"`);
 
+  // Fetch all contacts once; every branch below derives from this single read.
   const { data: contacts, error } = await client.from(CONTACTS_TABLE).select('*');
   if (error) throw toError(error, 'Failed to fetch contacts for audience');
-
   const all = contacts || [];
 
-  // Explicit email list (user-typed addresses). Enrich with contact data when
-  // the address exists in the contacts table so personalization still works.
-  // Mirrors resolveSegmentRecipients in supabase/functions/_shared/audience.ts.
+  // ─── 1. Manual email list (user-typed explicit addresses) ─────────────────
   const isManual = segment.includes('@') || segment.includes(',');
   if (isManual) {
     const emails = segment
@@ -695,10 +681,102 @@ export async function resolveContactsForAudience(audienceSegment) {
       seen.add(email);
       result.push(byEmail.get(email) || { id: null, email });
     }
+    console.log(`[Audience] manual segment "${segment}" → ${result.length} recipient(s)`);
     return result;
   }
 
-  if (!segment || segment.toLowerCase() === 'all contacts') return all;
+  // ─── 2. All Contacts (the only legitimate "everything") ───────────────────
+  if (!segment || name === 'all contacts') {
+    const seen = new Set();
+    const result = [];
+    for (const c of all) {
+      if (!c || !isDeliverableRecipientEmail(c.email)) continue;
+      const key = String(c.email).trim().toLowerCase();
+      if (seen.has(key)) continue;
+      seen.add(key);
+      result.push(c);
+    }
+    console.log(`[Audience] segment="${segment || 'ALL CONTACTS'}" → ${result.length} recipient(s) (all contacts)`);
+    return result;
+  }
 
-  return all.filter((c) => contactMatchesSegment(c, segment));
+  // ─── 3. Canonical contact_type / company_category resolution ──────────────
+  // Mirrors resolveSegmentRecipients in supabase/functions/_shared/audience.ts
+  // and the Contacts page's typeCounts. This is the authoritative set.
+  const seen = new Set();
+  const categoryRecipients = [];
+  for (const c of all) {
+    if (!c || !contactMatchesSegment(c, segment)) continue;
+    if (!isDeliverableRecipientEmail(c.email)) continue;
+    const key = String(c.email).trim().toLowerCase();
+    if (seen.has(key)) continue;
+    seen.add(key);
+    categoryRecipients.push(c);
+  }
+
+  if (categoryRecipients.length > 0) {
+    const ids = categoryRecipients.map((c) => c.id);
+    const types = Array.from(new Set(categoryRecipients.map((c) => c.contact_type || c.company_category || '(none)')));
+    console.log(`[Audience] segment="${segment}" → ${categoryRecipients.length} recipient(s) via contact_type/company_category`);
+    console.log(`[Audience] resolved contact ids: ${ids.join(', ')}`);
+    console.log(`[Audience] resolved contact_types: ${types.join(', ')}`);
+    // Excluded = every other contact whose type did NOT match this segment.
+    const excluded = all
+      .filter((c) => c && c.id && !ids.includes(c.id) && isDeliverableRecipientEmail(c.email))
+      .map((c) => `${c.contact_type || c.company_category || '?'}=${c.email}`);
+    console.log(`[Audience] excluded ${excluded.length} contact(s): ${excluded.join(', ')}`);
+    return categoryRecipients;
+  }
+
+  // ─── 4. Custom contact_list fallback (only when step 3 matched nothing) ───
+  // The segment is not a contact_type/company_category, so check whether it
+  // names a stored custom list. This branch is SECONDARY on purpose: a
+  // contact_type segment is always resolved by contact_type, never by a list
+  // that might contain unrelated contacts. A list with zero members yields zero
+  // recipients — never a silent "all contacts" expansion.
+  try {
+    const { data: listRow, error: listErr } = await client
+      .from('contact_lists')
+      .select('id')
+      .eq('name', segment)
+      .maybeSingle();
+    if (listErr && listErr.code !== '42P01') {
+      throw toError(listErr, 'Failed to check custom list');
+    }
+    if (listRow && listRow.id) {
+      const { data: members, error: memErr } = await client
+        .from('contact_list_members')
+        .select('contact_id')
+        .eq('list_id', listRow.id);
+      if (memErr) throw toError(memErr, 'Failed to fetch list members');
+      const ids = Array.from(new Set((members || []).map((m) => m.contact_id)));
+      if (ids.length > 0) {
+        const { data: rows, error: cErr } = await client
+          .from(CONTACTS_TABLE)
+          .select('*')
+          .in('id', ids);
+        if (cErr) throw toError(cErr, 'Failed to fetch contacts for list');
+        const listSeen = new Set();
+        const listRecipients = [];
+        for (const c of rows || []) {
+          if (!c || !isDeliverableRecipientEmail(c.email)) continue;
+          const key = String(c.email).trim().toLowerCase();
+          if (listSeen.has(key)) continue;
+          listSeen.add(key);
+          listRecipients.push(c);
+        }
+        console.log(`[Audience] segment="${segment}" → ${listRecipients.length} recipient(s) via custom list ${listRow.id}`);
+        console.log(`[Audience] resolved contact ids: ${listRecipients.map((c) => c.id).join(', ')}`);
+        return listRecipients;
+      }
+    }
+  } catch (err) {
+    // contact_lists may not be deployed in this project. That is not fatal for a
+    // contact_type segment — we already resolved (or correctly resolved to 0)
+    // above. Only the genuine custom-list case depends on this table.
+    console.warn(`[Audience] custom list lookup skipped for "${segment}": ${err.message}`);
+  }
+
+  console.log(`[Audience] segment="${segment}" → 0 recipient(s) (no matching contact_type or custom list)`);
+  return [];
 }

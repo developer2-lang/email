@@ -56,3 +56,25 @@ verify_jwt = false
 #   supabase functions deploy email-open-tracker --no-verify-jwt
 [functions.email-open-tracker]
 verify_jwt = false
+
+# The send-campaign Edge Function is the Campaigns-page "Send Now" endpoint.
+# The React app calls it via supabase.functions.invoke with the project
+# anon/publishable key (a public client credential already shipped to the
+# browser) — NOT with a user JWT — so JWT verification is disabled and the
+# function validates the key itself (see supabase/functions/send-campaign).
+# Without this entry the function deploys with the default verify_jwt = true
+# and the gateway rejects the browser's anon-key request with
+# "Unauthorized: send a valid Supabase JWT or the project anon/publishable key".
+# Equivalent deploy command:
+#   supabase functions deploy send-campaign --no-verify-jwt
+[functions.send-campaign]
+verify_jwt = false
+
+# The send-followup Edge Function is the Follow-ups-tab send endpoint. It is
+# called by the React app via supabase.functions.invoke with the project
+# anon/publishable key (same pattern as send-campaign), so JWT verification
+# is disabled and the function validates the key itself.
+# Equivalent deploy command:
+#   supabase functions deploy send-followup --no-verify-jwt
+[functions.send-followup]
+verify_jwt = false

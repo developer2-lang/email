@@ -5,8 +5,9 @@ import {
   filterContactsBySegment,
 } from './contactSegment';
 
-// Representative of the ACTUAL values stored in the Contacts table — these do
-// NOT equal the segment labels, which is the root of the original bug.
+// Representative of the ACTUAL values stored in the Contacts table. The Audience
+// Segment is DIRECTLY connected to `contacts.contact_type` — `company_category`
+// is never used for filtering.
 const contacts = [
   { id: '1', contact_type: 'Existing Client (Vatsal/ Shubham)', company_category: 'OEM' },
   { id: '2', contact_type: 'Existing Client (Vatsal/ Shubham)', company_category: 'International' },
@@ -15,6 +16,7 @@ const contacts = [
   { id: '5', contact_type: 'New Lead', company_category: 'OEM' },
   { id: '6', contact_type: 'New Lead', company_category: 'International' },
   { id: '7', contact_type: 'Prospect', company_category: 'OEM' },
+  { id: '8', contact_type: 'Test Client', company_category: 'OEM' },
 ];
 
 // The frontend Contact shape uses `type` / `category` instead of
@@ -33,38 +35,45 @@ describe('normalizeContactType', () => {
   });
 });
 
-describe('contactMatchesSegment (category prefix matching)', () => {
-  it('Existing Clients Only matches any existing-client contact_type', () => {
+describe('contactMatchesSegment — direct contact_type matching', () => {
+  it('exact contact_type match is the source of truth', () => {
+    expect(contactMatchesSegment({ contact_type: 'New Lead' }, 'New Lead')).toBe(true);
+    expect(
+      contactMatchesSegment({ contact_type: 'Existing Client (Vatsal/ Shubham)' }, 'Existing Client (Vatsal/ Shubham)')
+    ).toBe(true);
+    expect(contactMatchesSegment({ contact_type: 'New Client - Inbound' }, 'New Client - Inbound')).toBe(true);
+    // A different contact_type does NOT match.
+    expect(contactMatchesSegment({ contact_type: 'Existing Client (X)' }, 'New Lead')).toBe(false);
+  });
+
+  it('Existing Clients Only (generic label) does NOT match via prefix — only exact contact_type matches', () => {
+    // "Existing Clients Only" is not an exact contact_type value, so it matches
+    // nothing (the composer only offers exact contact_type segments).
     const matched = contacts.filter((c) => contactMatchesSegment(c, 'Existing Clients Only'));
-    expect(matched.map((c) => c.id)).toEqual(['1', '2']);
+    expect(matched.map((c) => c.id)).toEqual([]);
   });
 
-  it('New Clients matches New Client - Inbound / Outbound (and plain New Client)', () => {
-    expect(contactMatchesSegment({ contact_type: 'New Client' }, 'New Clients')).toBe(true);
-    expect(contactMatchesSegment({ contact_type: 'New Client - Inbound' }, 'New Clients')).toBe(true);
-    expect(contactMatchesSegment({ contact_type: 'New Client - Outbound' }, 'New Clients')).toBe(true);
-    // Does NOT match Existing Client or New Lead.
-    expect(contactMatchesSegment({ contact_type: 'Existing Client (X)' }, 'New Clients')).toBe(false);
-    expect(contactMatchesSegment({ contact_type: 'New Lead' }, 'New Clients')).toBe(false);
+  it('New Clients / New Leads (generic labels) do not over-match contact_types', () => {
+    // A specific contact_type matches ONLY itself.
+    expect(contactMatchesSegment({ contact_type: 'New Client - Inbound' }, 'New Clients')).toBe(false);
+    expect(contactMatchesSegment({ contact_type: 'New Lead' }, 'New Leads')).toBe(false);
+    // Exact contact_type still matches.
+    expect(contactMatchesSegment({ contact_type: 'New Lead' }, 'New Lead')).toBe(true);
   });
 
-  it('New Leads matches normalized new lead only', () => {
-    const matched = contacts.filter((c) => contactMatchesSegment(c, 'New Leads'));
-    expect(matched.map((c) => c.id)).toEqual(['5', '6']);
-  });
-
-  it('OEM Contacts matches company_category OEM', () => {
-    const matched = contacts.filter((c) => contactMatchesSegment(c, 'OEM Contacts'));
-    expect(matched.map((c) => c.id)).toEqual(['1', '3', '4', '5', '7']);
-  });
-
-  it('International Clients matches company_category International', () => {
-    const matched = contacts.filter((c) => contactMatchesSegment(c, 'International Clients'));
-    expect(matched.map((c) => c.id)).toEqual(['2', '6']);
+  it('company_category is NEVER used for audience filtering', () => {
+    // Even though these contacts have company_category OEM / International,
+    // selecting those labels must NOT match any contact.
+    expect(contacts.filter((c) => contactMatchesSegment(c, 'OEM')).length).toBe(0);
+    expect(contacts.filter((c) => contactMatchesSegment(c, 'OEM Contacts')).length).toBe(0);
+    expect(contacts.filter((c) => contactMatchesSegment(c, 'International Clients')).length).toBe(0);
+    // A contact with company_category OEM but contact_type New Lead is NOT
+    // matched by the "OEM" label.
+    expect(contactMatchesSegment(contacts[4], 'OEM')).toBe(false);
   });
 
   it('works with the frontend Contact shape (type/category)', () => {
-    const matched = mappedContacts.filter((c) => contactMatchesSegment(c, 'Existing Clients Only'));
+    const matched = mappedContacts.filter((c) => contactMatchesSegment(c, 'Existing Client (Vatsal/ Shubham)'));
     expect(matched.map((c) => c.id)).toEqual(['1', '2']);
   });
 });
@@ -80,8 +89,9 @@ describe('filterContactsBySegment', () => {
       'Existing Clients Only',
       'New Clients',
       'New Leads',
-      'OEM Contacts',
-      'International Clients',
+      'New Lead',
+      'New Client - Inbound',
+      'Test Client',
     ]) {
       const filtered = filterContactsBySegment(contacts, seg);
       const counted = contacts.filter((c) => contactMatchesSegment(c, seg)).length;

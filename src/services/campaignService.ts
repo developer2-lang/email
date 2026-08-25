@@ -343,6 +343,10 @@ function toInsertRow(input: CampaignInput) {
     html_content: input.html_content || input.email_body || null,
     template_name: input.template_name?.trim() || null,
     status: input.status || 'draft',
+    batch_enabled: input.batch_enabled ?? false,
+    batch_size: input.batch_size != null ? Math.max(1, Number(input.batch_size) || 30) : 30,
+    batch_interval_minutes:
+      input.batch_interval_minutes != null ? Math.max(1, Number(input.batch_interval_minutes) || 60) : 60,
     updated_at: new Date().toISOString(),
   }
 }
@@ -352,7 +356,7 @@ function toInsertRow(input: CampaignInput) {
  * Handles already-12h strings ("02:15 PM"), 24h times ("14:15", "14:15:00"),
  * and ISO timestamps (sent_at) converted to the viewer's local time.
  */
-function formatTime(input?: string | null): string {
+export function formatTime(input?: string | null): string {
   if (!input) return '—'
   const trimmed = input.trim()
   if (/^(0?[1-9]|1[0-2]):[0-5]\d(:[0-5]\d)?\s*[APap][Mm]$/.test(trimmed)) {
@@ -435,6 +439,12 @@ function mapRowToCampaign(
     clickRate,
     time,
     scheduleText: resolveScheduleText(row as Record<string, any>, scheduleRow),
+    batchEnabled: row.batch_enabled === true,
+    batchSize: typeof row.batch_size === 'number' ? row.batch_size : 30,
+    batchIntervalMinutes: typeof row.batch_interval_minutes === 'number' ? row.batch_interval_minutes : 60,
+    currentBatchNumber: typeof row.current_batch_number === 'number' ? row.current_batch_number : 0,
+    totalBatches: typeof row.total_batches === 'number' ? row.total_batches : null,
+    nextBatchAt: row.next_batch_at || null,
   }
 }
 
@@ -900,6 +910,10 @@ export interface CampaignLaunchPayload {
    * the campaign and attaches the files to every email.
    */
   attachments?: CampaignAttachmentPayload[]
+  // ── Batch / throttled sending ──
+  batch_enabled?: boolean | null
+  batch_size?: number | null
+  batch_interval_minutes?: number | null
 }
 
 /**
@@ -1126,6 +1140,10 @@ function buildCampaignRecord(payload: CampaignLaunchPayload, status: string): Re
     schedule_date: payload.schedule_date ? String(payload.schedule_date).trim() : null,
     schedule_time: payload.schedule_time ? String(payload.schedule_time).trim() : null,
     status,
+    batch_enabled: payload.batch_enabled ?? false,
+    batch_size: payload.batch_size != null ? Math.max(1, Number(payload.batch_size) || 30) : 30,
+    batch_interval_minutes:
+      payload.batch_interval_minutes != null ? Math.max(1, Number(payload.batch_interval_minutes) || 60) : 60,
   }
 }
 
@@ -1177,18 +1195,38 @@ async function persistScheduleIfPresent(saved: any, payload: CampaignLaunchPaylo
  * Pull the real reason out of an invoke error. `FunctionsHttpError` wraps the
  * function's Response in `error.context`; without this the UI would only ever
  * show the SDK's generic "Edge Function returned a non-2xx status code".
+ *
+ * The returned message is prefixed with the function name (e.g.
+ * `send-campaign:`) so a future authorization failure clearly identifies
+ * WHICH request/function failed instead of only showing a generic
+ * "Unauthorized" message.
  */
-async function extractFunctionError(error: unknown): Promise<string> {
-  const context = (error as { context?: Response }).context
-  if (context && typeof context.json === 'function') {
+async function extractFunctionError(functionName: string, error: unknown): Promise<string> {
+  const err = error as { context?: Response; status?: number }
+  const status = err?.status ?? err?.context?.status
+  const isAuthError = status === 401 || status === 403
+  if (err?.context && typeof err.context.json === 'function') {
     try {
-      const body = (await context.json()) as { error?: string } | null
-      if (body?.error) return body.error
+      const body = (await err.context.json()) as { error?: string; message?: string } | null
+      const detail = body?.error || body?.message
+      if (detail) {
+        if (isAuthError) {
+          return `${functionName}: authorization failed (HTTP ${status}) — ${detail}`
+        }
+        return `${functionName}: ${detail}`
+      }
     } catch {
       // Response body not JSON — fall through to the generic message.
     }
   }
-  return error instanceof Error ? error.message : 'Failed to send campaign'
+  if (isAuthError) {
+    return (
+      `${functionName}: authorization failed (HTTP ${status ?? '?'}). ` +
+      `The '${functionName}' Edge Function requires 'verify_jwt = false' in ` +
+      `supabase/config.toml (it is invoked from the browser with the anon key).`
+    )
+  }
+  return `${functionName}: ${error instanceof Error ? error.message : 'request failed'}`
 }
 
 /**
@@ -1199,7 +1237,7 @@ async function extractFunctionError(error: unknown): Promise<string> {
 export async function sendCampaign(payload: CampaignLaunchPayload): Promise<CampaignLaunchResult> {
   const { data, error } = await supabase.functions.invoke('send-campaign', { body: payload })
   if (error) {
-    throw new Error(await extractFunctionError(error))
+    throw new Error(await extractFunctionError('send-campaign', error))
   }
   const body = data as { success?: boolean; data?: CampaignLaunchResult; error?: { message?: string } } | null
   if (!body || body.success === false) {
