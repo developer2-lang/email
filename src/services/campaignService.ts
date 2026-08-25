@@ -443,7 +443,7 @@ function mapRowToCampaign(
     batchSize: typeof row.batch_size === 'number' ? row.batch_size : 30,
     batchIntervalMinutes: typeof row.batch_interval_minutes === 'number' ? row.batch_interval_minutes : 60,
     currentBatchNumber: typeof row.current_batch_number === 'number' ? row.current_batch_number : 0,
-    totalBatches: typeof row.total_batches === 'number' ? row.total_batches : null,
+    totalBatches: typeof row.total_batches === 'number' ? row.total_batches : undefined,
     nextBatchAt: row.next_batch_at || null,
   }
 }
