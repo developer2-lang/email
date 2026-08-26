@@ -1334,12 +1334,18 @@ async function processCampaign(campaignId: string): Promise<{ sent: number; fail
     // ── Batch / throttled sending configuration ──
     // When OFF (the default, and when the migration columns are absent) the
     // campaign behaves exactly as before: every eligible recipient is drained.
+    // ── Batch / throttled sending configuration (HARD-CODED) ──
+    // Batch sending is always ON, fixed at 30 contacts per batch with a 1-hour gap.
+    // These values are intentionally not read from the campaign row so the user
+    // cannot change them. The migration columns (batch_number, current_batch_number,
+    // next_batch_at, …) are required for the resumable batch state — if they are
+    // missing we fall back to a single full drain so sending still works.
     const batchCols = await campaignsHaveBatchCols();
-    const batchEnabled = batchCols && campaign.batch_enabled === true;
-    const batchSize = batchEnabled ? Math.max(1, Number(campaign.batch_size) || 30) : MAX_EMAILS_PER_RUN;
-    const batchIntervalMs = batchEnabled
-      ? Math.max(1, Number(campaign.batch_interval_minutes) || 60) * 60000
-      : 0;
+    const batchEnabled = batchCols;
+    const BATCH_SIZE = 30;
+    const BATCH_INTERVAL_MS = 60 * 60 * 1000;
+    const batchSize = batchEnabled ? BATCH_SIZE : MAX_EMAILS_PER_RUN;
+    const batchIntervalMs = batchEnabled ? BATCH_INTERVAL_MS : 0;
     let sent = 0;
     let failed = 0;
 

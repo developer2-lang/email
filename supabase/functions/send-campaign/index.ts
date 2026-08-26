@@ -268,10 +268,11 @@ function buildCampaignRecord(data: CampaignPayload, status: string) {
     schedule_date: data.schedule_date ? String(data.schedule_date).trim() : null,
     schedule_time: data.schedule_time ? String(data.schedule_time).trim() : null,
     status,
-    batch_enabled: data.batch_enabled ?? false,
-    batch_size: data.batch_size != null ? Math.max(1, Number(data.batch_size) || 30) : 30,
-    batch_interval_minutes:
-      data.batch_interval_minutes != null ? Math.max(1, Number(data.batch_interval_minutes) || 60) : 60,
+    // Batch / throttled sending is HARD-CODED: 30 contacts per batch, 1 hour
+    // between batches. The user is not allowed to change these values.
+    batch_enabled: true,
+    batch_size: 30,
+    batch_interval_minutes: 60,
   };
 }
 
@@ -1294,12 +1295,18 @@ async function processCampaign(
   // ── Batch / throttled sending configuration ──
   // When OFF (the default, and when the migration columns are absent) Send Now
   // behaves exactly as before: the whole list is drained this invocation.
+  // ── Batch / throttled sending configuration (HARD-CODED) ──
+  // Batch sending is always ON, fixed at 30 contacts per batch with a 1-hour gap.
+  // These values are intentionally not read from the campaign row so the user
+  // cannot change them. The migration columns (batch_number, current_batch_number,
+  // next_batch_at, …) are required for the resumable batch state — if they are
+  // missing we fall back to a single full drain so sending still works.
   const batchCols = await campaignsHaveBatchCols();
-  const batchEnabled = batchCols && campaign.batch_enabled === true;
-  const batchSize = batchEnabled ? Math.max(1, Number(campaign.batch_size) || 30) : MAX_EMAILS_PER_RUN;
-  const batchIntervalMs = batchEnabled
-    ? Math.max(1, Number(campaign.batch_interval_minutes) || 60) * 60000
-    : 0;
+  const batchEnabled = batchCols;
+  const BATCH_SIZE = 30;
+  const BATCH_INTERVAL_MS = 60 * 60 * 1000;
+  const batchSize = batchEnabled ? BATCH_SIZE : MAX_EMAILS_PER_RUN;
+  const batchIntervalMs = batchEnabled ? BATCH_INTERVAL_MS : 0;
   let sent = 0;
   let failed = 0;
 

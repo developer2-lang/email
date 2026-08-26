@@ -2,6 +2,7 @@ import { forwardRef, useCallback, useEffect, useImperativeHandle, useRef, useSta
 import grapesjs, { type Component, type Editor } from 'grapesjs';
 import 'grapesjs/dist/css/grapes.min.css';
 import { uploadEmailImage } from '../services/campaignService';
+import { normalizeEmailLinks } from '../utils/emailRender';
 import {
   SOCIAL_DATA_ATTR,
   SOCIAL_PLATFORMS,
@@ -377,6 +378,14 @@ const EMAIL_EDITOR_BLOCKS = [
     media: '<span class="te-blk">☰</span>',
     content: buildFooterHtml(),
   },
+  {
+    id: 'te-link',
+    label: 'Link',
+    category: 'CONTENT',
+    media: '<span class="te-blk">🔗</span>',
+    content:
+      '<a data-te-link="" href="https://example.com" style="color: #0066CC !important; text-decoration: underline !important; cursor: pointer; font-family: Arial, Helvetica, sans-serif; font-size: 15px;">Link Text</a>',
+  },
 ];
 
 /** Build the default email footer markup. The root `<div>` carries the
@@ -450,6 +459,11 @@ function getDocumentHtml(editor: Editor): string {
   // which must survive so the container hierarchy is reconstructed on reload
   // and preserved verbatim on preview/send.
   html = html.replace(/\s+data-te-role=(?:"(?!container")[^"]*"|'(?!container')[^']*')/gi, '');
+  // Guarantee every text hyperlink is one continuous, blue, underlined,
+  // wrapping-safe <a> before the template is saved — so the stored HTML (and
+  // therefore the reopened editor, preview and sent email) never contains a
+  // link whose wrapped continuation was left as plain black text.
+  html = normalizeEmailLinks(html);
   return html;
 }
 
@@ -940,9 +954,11 @@ function AlignmentButtons({
 function TextStyleToggles({
   getStyle,
   setStyle,
+  editor,
 }: {
   getStyle: (prop: string) => string;
   setStyle: (prop: string, value: string) => void;
+  editor?: Editor | null;
 }) {
   const isBold = () => {
     const w = getStyle('font-weight').trim().toLowerCase();
@@ -952,21 +968,429 @@ function TextStyleToggles({
     ['italic', 'oblique'].includes(getStyle('font-style').trim().toLowerCase());
   const isUnderline = () =>
     getStyle('text-decoration').trim().toLowerCase().includes('underline');
+
+  const [linkOpen, setLinkOpen] = useState(false);
+  const [linkSelText, setLinkSelText] = useState('');
+  const [linkSelUrl, setLinkSelUrl] = useState('');
+  const savedSelectionRef = useRef<{ range: Range; sel: Selection } | null>(null);
+
+  const handleLinkClick = () => {
+    if (!editor) return;
+
+    // Save the current selection from the canvas iframe
+    const iframe = editor.Canvas.getFrameEl();
+    if (!iframe) return;
+    const iframeWin = iframe.contentWindow;
+    const iframeDoc = iframe.contentDocument || iframeWin?.document;
+    if (!iframeWin || !iframeDoc) return;
+
+    const sel = iframeWin.getSelection();
+    if (!sel || sel.rangeCount === 0 || sel.isCollapsed) {
+      setLinkSelText('');
+      setLinkSelUrl('');
+      setLinkOpen(true);
+      return;
+    }
+
+    // Save the selection so we can restore it after the modal closes
+    savedSelectionRef.current = {
+      range: sel.getRangeAt(0).cloneRange(),
+      sel,
+    };
+
+    // Check if selection is inside an existing link
+    const range = sel.getRangeAt(0);
+    let ancestorNode = range.commonAncestorContainer;
+    if (ancestorNode.nodeType === Node.TEXT_NODE) {
+      ancestorNode = ancestorNode.parentNode!;
+    }
+    const existingAnchor = (ancestorNode as Element)?.closest?.('a');
+
+    if (existingAnchor) {
+      setLinkSelText(existingAnchor.textContent || sel.toString());
+      setLinkSelUrl(existingAnchor.getAttribute('href') || '');
+    } else {
+      setLinkSelText(sel.toString());
+      setLinkSelUrl('');
+    }
+
+    setLinkOpen(true);
+  };
+
+  const handleLinkApply = (text: string, url: string) => {
+    if (!editor) return;
+
+    // Restore the saved selection before applying
+    const saved = savedSelectionRef.current;
+    if (saved) {
+      saved.sel.removeAllRanges();
+      saved.sel.addRange(saved.range);
+    }
+
+    applyLinkToSelection(editor, url, text || undefined);
+    savedSelectionRef.current = null;
+    setLinkOpen(false);
+  };
+
   return (
-    <div style={{ display: 'flex', gap: '4px', marginBottom: '10px' }}>
-      <ToggleBtn active={isBold()} title="Bold" onClick={() => setStyle('font-weight', isBold() ? 'normal' : 'bold')}>
-        B
-      </ToggleBtn>
-      <ToggleBtn active={isItalic()} title="Italic" onClick={() => setStyle('font-style', isItalic() ? 'normal' : 'italic')}>
-        I
-      </ToggleBtn>
-      <ToggleBtn
-        active={isUnderline()}
-        title="Underline"
-        onClick={() => setStyle('text-decoration', isUnderline() ? 'none' : 'underline')}
+    <>
+      <div style={{ display: 'flex', gap: '4px', marginBottom: '10px' }}>
+        <ToggleBtn active={isBold()} title="Bold" onClick={() => setStyle('font-weight', isBold() ? 'normal' : 'bold')}>
+          B
+        </ToggleBtn>
+        <ToggleBtn active={isItalic()} title="Italic" onClick={() => setStyle('font-style', isItalic() ? 'normal' : 'italic')}>
+          I
+        </ToggleBtn>
+        <ToggleBtn
+          active={isUnderline()}
+          title="Underline"
+          onClick={() => setStyle('text-decoration', isUnderline() ? 'none' : 'underline')}
+        >
+          U
+        </ToggleBtn>
+        <ToggleBtn
+          active={false}
+          title="Insert Link"
+          onClick={handleLinkClick}
+        >
+          🔗
+        </ToggleBtn>
+      </div>
+      <LinkModal
+        open={linkOpen}
+        initialText={linkSelText}
+        initialUrl={linkSelUrl}
+        onApply={handleLinkApply}
+        onClose={() => {
+          setLinkOpen(false);
+          savedSelectionRef.current = null;
+        }}
+      />
+    </>
+  );
+}
+
+/* ─── Link helper: apply/update an <a> to the current selection in the canvas iframe ── */
+
+function applyLinkToSelection(
+  editor: Editor,
+  url: string,
+  selectedText?: string,
+) {
+  const iframe = editor.Canvas.getFrameEl();
+  if (!iframe) return;
+  const iframeWin = iframe.contentWindow;
+  const iframeDoc = iframe.contentDocument || iframeWin?.document;
+  if (!iframeWin || !iframeDoc) return;
+
+  const sel = iframeWin.getSelection();
+  if (!sel || sel.rangeCount === 0 || sel.isCollapsed) return;
+
+  const range = sel.getRangeAt(0);
+
+  // Check if selection is already inside an existing <a> — update it instead of nesting.
+  let ancestorNode = range.commonAncestorContainer;
+  if (ancestorNode.nodeType === Node.TEXT_NODE) {
+    ancestorNode = ancestorNode.parentNode!;
+  }
+  const existingAnchor = (ancestorNode as Element)?.closest?.('a');
+
+  if (existingAnchor) {
+    // Update existing anchor href and text
+    existingAnchor.setAttribute('href', url);
+    if (selectedText !== undefined && selectedText !== null) {
+      existingAnchor.textContent = selectedText;
+    }
+    // Normalize nested children and apply link styles
+    normalizeAnchorStyles(existingAnchor);
+    sel.removeAllRanges();
+    return;
+  }
+
+  // Extract the selected HTML content
+  const frag = range.cloneContents();
+  const wrapper = iframeDoc.createElement('div');
+  wrapper.appendChild(frag);
+  const html = wrapper.innerHTML;
+
+  // If the user provided custom text, replace the content entirely
+  const linkContent = selectedText !== undefined && selectedText !== null
+    ? iframeDoc.createTextNode(selectedText)
+    : null;
+
+  range.deleteContents();
+
+  const anchor = iframeDoc.createElement('a');
+  anchor.setAttribute('href', url);
+  anchor.setAttribute(
+    'style',
+    'color:#0066cc !important;text-decoration:underline !important;overflow-wrap:anywhere;word-break:break-word;',
+  );
+
+  if (linkContent) {
+    anchor.appendChild(linkContent);
+  } else {
+    // Parse the original HTML and move all nodes into the anchor
+    const temp = iframeDoc.createElement('div');
+    temp.innerHTML = html;
+    while (temp.firstChild) {
+      anchor.appendChild(temp.firstChild);
+    }
+  }
+
+  range.insertNode(anchor);
+
+  // Normalize: flatten any nested <u> or <span> that conflict with link styles
+  normalizeAnchorStyles(anchor);
+
+  sel.removeAllRanges();
+}
+
+/** Remove nested <u>, <span>, and <font> elements inside an anchor and ensure
+ *  the anchor has inline email-safe link styles. */
+function normalizeAnchorStyles(anchor: Element) {
+  // Flatten nested <u> tags (unwrap them — the anchor's text-decoration handles underline)
+  anchor.querySelectorAll('u').forEach((u) => {
+    while (u.firstChild) u.parentNode!.insertBefore(u.firstChild, u);
+    u.remove();
+  });
+
+  // Remove conflicting color/text-decoration from direct child spans
+  anchor.querySelectorAll('span').forEach((span) => {
+    span.style.removeProperty('color');
+    span.style.removeProperty('text-decoration');
+    span.style.removeProperty('text-decoration-line');
+    // If span is now empty of styles, strip the style attribute entirely
+    if (!span.getAttribute('style')) span.removeAttribute('style');
+    // If span wrapper is unnecessary, unwrap it
+    if (span.childNodes.length === 1 && span.firstChild?.nodeType === Node.TEXT_NODE) {
+      span.parentNode!.insertBefore(span.firstChild, span);
+      span.remove();
+    }
+  });
+
+  // Strip any inline color/decoration from child font tags
+  anchor.querySelectorAll('font').forEach((f) => {
+    f.style.removeProperty('color');
+    f.removeAttribute('color');
+  });
+
+  // Ensure the anchor itself has the correct inline styles
+  anchor.setAttribute(
+    'style',
+    'color:#0066cc !important;text-decoration:underline !important;overflow-wrap:anywhere;word-break:break-word;',
+  );
+
+  // Re-merge a pasted long URL the browser may have split at a soft wrap: the
+  // first line ends up inside the <a> while the remainder sits as plain (black)
+  // text in a following text node. Pull that continuation back into the anchor
+  // so the link stays one continuous, wrapping-safe hyperlink.
+  mergeAnchorContinuationDom(anchor);
+}
+
+/**
+ * DOM variant of the send-time split-merge: if the anchor's text is a prefix of
+ * its destination URL and the immediately following text node(s) continue that
+ * same URL (separated only by whitespace/<br>), absorb them into the anchor.
+ */
+function mergeAnchorContinuationDom(anchor: Element) {
+  const doc = anchor.ownerDocument || (anchor as any).document;
+  const href = anchor.getAttribute('href') || '';
+  let target = href;
+  const um = href.match(/[?&]url=([^&#]+)/i);
+  if (um) {
+    try {
+      target = decodeURIComponent(um[1]);
+    } catch {
+      target = href;
+    }
+  }
+  if (!/^https?:\/\//i.test(target) && !/^mailto:/i.test(target)) return;
+  let text = anchor.textContent || '';
+  if (target.length <= text.length) return;
+
+  let sib: Node | null = anchor.nextSibling;
+  while (sib) {
+    if (sib.nodeType === Node.TEXT_NODE) {
+      const raw = sib.textContent || '';
+      const trimmed = raw.replace(/^\s+/, '');
+      if (trimmed && !/\s/.test(trimmed) && target.startsWith(text + trimmed)) {
+        text = text + trimmed;
+        anchor.appendChild(doc.createTextNode(trimmed));
+        const after = sib.nextSibling;
+        if (sib.parentNode) sib.parentNode.removeChild(sib);
+        sib = after;
+        continue;
+      }
+      if (/^\s*$/.test(raw)) {
+        sib = sib.nextSibling;
+        continue;
+      }
+      break;
+    } else if (sib.nodeType === Node.ELEMENT_NODE) {
+      const tag = (sib as Element).tagName ? (sib as Element).tagName.toLowerCase() : '';
+      if (tag === 'br' || tag === 'wbr') {
+        sib = sib.nextSibling;
+        continue;
+      }
+      break;
+    } else {
+      sib = sib.nextSibling;
+    }
+  }
+}
+
+function LinkModal({
+  open,
+  initialText,
+  initialUrl,
+  onApply,
+  onClose,
+}: {
+  open: boolean;
+  initialText: string;
+  initialUrl: string;
+  onApply: (text: string, url: string) => void;
+  onClose: () => void;
+}) {
+  const [text, setText] = useState(initialText);
+  const [url, setUrl] = useState(initialUrl);
+  const textRef = useRef<HTMLInputElement>(null);
+
+  useEffect(() => {
+    if (open) {
+      setText(initialText);
+      setUrl(initialUrl);
+      setTimeout(() => textRef.current?.focus(), 50);
+    }
+  }, [open, initialText, initialUrl]);
+
+  if (!open) return null;
+
+  const handleApply = () => {
+    const trimmedUrl = url.trim();
+    if (!trimmedUrl) return;
+    onApply(text.trim(), trimmedUrl);
+  };
+
+  const handleKeyDown = (e: React.KeyboardEvent) => {
+    if (e.key === 'Enter') {
+      e.preventDefault();
+      handleApply();
+    } else if (e.key === 'Escape') {
+      onClose();
+    }
+  };
+
+  return (
+    <div
+      style={{
+        position: 'fixed',
+        inset: 0,
+        zIndex: 9999,
+        display: 'flex',
+        alignItems: 'center',
+        justifyContent: 'center',
+        background: 'rgba(0,0,0,0.35)',
+      }}
+      onMouseDown={(e) => {
+        if (e.target === e.currentTarget) onClose();
+      }}
+    >
+      <div
+        style={{
+          background: '#fff',
+          borderRadius: 12,
+          padding: 24,
+          width: 420,
+          maxWidth: '90vw',
+          boxShadow: '0 8px 32px rgba(0,0,0,0.18)',
+        }}
+        onMouseDown={(e) => e.stopPropagation()}
       >
-        U
-      </ToggleBtn>
+        <h3 style={{ margin: '0 0 16px', fontSize: 16, fontWeight: 700, color: '#1e293b' }}>
+          Insert Link
+        </h3>
+
+        <label style={{ display: 'block', marginBottom: 12 }}>
+          <span style={{ display: 'block', fontSize: 12, fontWeight: 600, color: '#475569', marginBottom: 4 }}>
+            Text
+          </span>
+          <input
+            ref={textRef}
+            type="text"
+            value={text}
+            onChange={(e) => setText(e.target.value)}
+            onKeyDown={handleKeyDown}
+            placeholder="Link text"
+            style={{
+              width: '100%',
+              padding: '8px 10px',
+              border: '1px solid #cbd5e1',
+              borderRadius: 8,
+              fontSize: 13,
+              boxSizing: 'border-box',
+            }}
+          />
+        </label>
+
+        <label style={{ display: 'block', marginBottom: 20 }}>
+          <span style={{ display: 'block', fontSize: 12, fontWeight: 600, color: '#475569', marginBottom: 4 }}>
+            URL
+          </span>
+          <input
+            type="url"
+            value={url}
+            onChange={(e) => setUrl(e.target.value)}
+            onKeyDown={handleKeyDown}
+            placeholder="https://example.com"
+            style={{
+              width: '100%',
+              padding: '8px 10px',
+              border: '1px solid #cbd5e1',
+              borderRadius: 8,
+              fontSize: 13,
+              boxSizing: 'border-box',
+            }}
+          />
+        </label>
+
+        <div style={{ display: 'flex', justifyContent: 'flex-end', gap: 8 }}>
+          <button
+            type="button"
+            onClick={onClose}
+            style={{
+              padding: '8px 16px',
+              borderRadius: 8,
+              border: '1px solid #e2e8f0',
+              background: '#fff',
+              color: '#475569',
+              fontSize: 13,
+              fontWeight: 600,
+              cursor: 'pointer',
+            }}
+          >
+            Cancel
+          </button>
+          <button
+            type="button"
+            onClick={handleApply}
+            disabled={!url.trim()}
+            style={{
+              padding: '8px 16px',
+              borderRadius: 8,
+              border: 'none',
+              background: url.trim() ? '#2563eb' : '#94a3b8',
+              color: '#fff',
+              fontSize: 13,
+              fontWeight: 600,
+              cursor: url.trim() ? 'pointer' : 'default',
+            }}
+          >
+            Apply Link
+          </button>
+        </div>
+      </div>
     </div>
   );
 }
@@ -1131,6 +1555,21 @@ function findFooterPart(root: Component | null, name: string): Component | null 
     return null;
   };
   return walk(root.components().models);
+}
+
+/** True when the component is the Link content block. */
+function isLinkBlock(component: Component | null): boolean {
+  return !!component?.getAttributes()?.['data-te-link'];
+}
+
+/** Walk up the component tree to find the enclosing Link block, if any. */
+function findLinkBlock(component: Component | null): Component | null {
+  let current: Component | null = component;
+  while (current) {
+    if (isLinkBlock(current)) return current;
+    current = current.parent() as Component | null;
+  }
+  return null;
 }
 
 /** Index of an icon anchor inside its social block (matches the icons array). */
@@ -2354,6 +2793,161 @@ function ContainerPropertiesPanel({
   );
 }
 
+/* ─── Link block (properties) panel ────────────────────────────────────── */
+
+function LinkPropertiesPanel({
+  editor,
+  component: comp,
+  tick,
+}: {
+  editor: Editor;
+  component: Component;
+  tick: number;
+}) {
+  void tick;
+  void editor;
+
+  const getStyle = (prop: string) => getCompStyle(comp, prop);
+  const setStyle = (prop: string, value: string) => setCompStyle(comp, prop, value);
+  const setAttr = (name: string, value: string) => setCompAttr(comp, name, value);
+
+  const removeElement = () => {
+    if (window.confirm('Delete this link from the email?')) {
+      const selected = comp;
+      if (selected) selected.remove();
+    }
+  };
+  const duplicateElement = () => {
+    const parent = comp.parent();
+    if (!parent) return;
+    const clone = comp.clone();
+    parent.append(clone, { at: comp.index() + 1 });
+    editor.select(clone);
+  };
+  const moveUp = () => {
+    if (comp.parent() && comp.index() > 0) comp.move(comp.parent() as Component, { at: comp.index() - 1 });
+  };
+  const moveDown = () => {
+    if (comp.parent()) comp.move(comp.parent() as Component, { at: comp.index() + 1 });
+  };
+
+  const linkText = String(comp.get('content') || '');
+  const linkUrl = String(comp.getAttributes().href || '');
+  const linkColor = getStyle('color') || '#0066CC';
+  const linkFontSize = parseFloat(getStyle('font-size')) ? String(parseFloat(getStyle('font-size'))) : '15';
+  const textDecoration = getStyle('text-decoration') || getStyle('text-decoration-line') || 'underline';
+  const isUnderline = textDecoration.includes('underline');
+  const textAlign = getStyle('text-align') || 'left';
+  const openNewTab = String(comp.getAttributes().target || '') === '_blank';
+
+  return (
+    <div style={{ padding: '14px' }}>
+      <div
+        style={{
+          display: 'flex',
+          alignItems: 'center',
+          justifyContent: 'space-between',
+          gap: '8px',
+          marginBottom: '12px',
+          paddingBottom: '10px',
+          borderBottom: '1px solid #E2E8F0',
+        }}
+      >
+        <div style={{ minWidth: 0 }}>
+          <div style={{ fontSize: '13px', fontWeight: 700, color: '#0F172A' }}>Link Properties</div>
+          <div style={{ fontSize: '11px', color: '#94A3B8' }}>Configure the link text and URL</div>
+        </div>
+        <div style={{ display: 'flex', gap: '4px' }}>
+          <button type="button" title="Move link up" onClick={moveUp} style={iconBtn}>↑</button>
+          <button type="button" title="Move link down" onClick={moveDown} style={iconBtn}>↓</button>
+          <button type="button" title="Duplicate link" onClick={duplicateElement} style={iconBtn}>⧉</button>
+          <button
+            type="button"
+            title="Delete link"
+            onClick={removeElement}
+            style={smallBtn('#FEF2F2', '#DC2626', '#FECACA')}
+          >
+            Delete
+          </button>
+        </div>
+      </div>
+
+      <Field label="Link Text">
+        <TextInput
+          value={linkText}
+          onChange={(v) => comp.set('content', v)}
+        />
+      </Field>
+
+      <Field label="URL">
+        <TextInput
+          value={linkUrl}
+          onChange={(v) => setAttr('href', normalizeButtonUrl(v))}
+          placeholder="https://example.com"
+        />
+      </Field>
+
+      <Field label="Text Color">
+        <ColorInput
+          value={linkColor}
+          onChange={(v) => {
+            if (isValidColorValue(v)) setStyle('color', v);
+          }}
+          onReset={() => setStyle('color', '#0066CC')}
+        />
+      </Field>
+
+      <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: '6px' }}>
+        <Field label="Font Size">
+          <NumberInput
+            value={linkFontSize}
+            onChange={(v) => setStyle('font-size', v ? `${parseFloat(v) || 15}px` : '')}
+            min={8}
+            max={72}
+          />
+        </Field>
+        <Field label="Font Family">
+          <SelectInput
+            value={getStyle('font-family') || 'Arial, Helvetica, sans-serif'}
+            onChange={(v) => setStyle('font-family', v)}
+            options={FONT_FAMILIES}
+          />
+        </Field>
+      </div>
+
+      <Field label="Alignment">
+        <AlignmentButtons value={textAlign} onChange={(v) => setStyle('text-align', v)} />
+      </Field>
+
+      <Field label="Underline">
+        <div style={{ display: 'flex', gap: '4px' }}>
+          <ToggleBtn
+            active={isUnderline}
+            onClick={() => setStyle('text-decoration', isUnderline ? 'none' : 'underline')}
+          >
+            {isUnderline ? 'On' : 'Off'}
+          </ToggleBtn>
+        </div>
+      </Field>
+
+      <Field label="Open in new tab">
+        <div style={{ display: 'flex', gap: '4px' }}>
+          <ToggleBtn
+            active={openNewTab}
+            onClick={() => setAttr('target', openNewTab ? '' : '_blank')}
+          >
+            {openNewTab ? 'Yes' : 'No'}
+          </ToggleBtn>
+        </div>
+      </Field>
+
+      <Field label="Spacing">
+        <SpacingFields getStyle={getStyle} setStyle={setStyle} />
+      </Field>
+    </div>
+  );
+}
+
 /* ─── Main Properties panel ──────────────────────────────────────────────── */
 
 function PropertiesPanel({ editor, component, tick, onError }: PropertiesPanelProps) {
@@ -2375,6 +2969,13 @@ function PropertiesPanel({ editor, component, tick, onError }: PropertiesPanelPr
   const footerRoot = findFooterContainer(component);
   if (footerRoot) {
     return <FooterPropertiesPanel editor={editor} component={component} footerRoot={footerRoot} tick={tick} />;
+  }
+
+  // The Link content block gets its own dedicated panel so the user can edit
+  // the link text, URL, color, font size, alignment and underline settings.
+  const linkBlock = findLinkBlock(component);
+  if (linkBlock) {
+    return <LinkPropertiesPanel editor={editor} component={linkBlock} tick={tick} />;
   }
 
   // The explicit Container (its table or its inner cell) gets a dedicated panel
@@ -2682,7 +3283,7 @@ function PropertiesPanel({ editor, component, tick, onError }: PropertiesPanelPr
           </Field>
         </div>
         <Field label="Style">
-          <TextStyleToggles getStyle={getStyle} setStyle={setStyle} />
+          <TextStyleToggles getStyle={getStyle} setStyle={setStyle} editor={editor} />
         </Field>
         <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: '6px' }}>
           <Field label="Line Height">
@@ -3153,6 +3754,8 @@ const EDITOR_CSS = `
 .te-editor .gjs-toolbar-item { font-size: 12px; padding: 0 6px; display: inline-flex; align-items: center; justify-content: center; min-width: 26px; }
 .te-editor .gjs-drop-indicator { background: #2563EB; height: 3px; border-radius: 3px; }
 .te-editor .gjs-com-badge { background: #2563EB; }
+.te-editor [data-te-link] { color: #0066CC !important; text-decoration: underline !important; cursor: pointer; }
+.te-editor [data-te-link]:hover { opacity: 0.85; }
 `;
 
 /* ─── Main component ─────────────────────────────────────────────────────── */
@@ -3342,6 +3945,33 @@ const TemplateVisualEditor = forwardRef<TemplateVisualEditorHandle, TemplateVisu
           },
         });
       }
+
+      // ── Link block component type ────────────────────────────────────────
+      // The Link content block uses a `data-te-link` marker attribute so it
+      // persists across save/reload and is recognized as a dedicated link
+      // component (distinct from Button anchors which use `data-te-button`).
+      editor.DomComponents.addType('te-link', {
+        extend: 'link',
+        isComponent: (el: any) =>
+          !!el && !!el.getAttribute && el.getAttribute('data-te-link') !== undefined,
+        model: {
+          defaults: {
+            resizable: UNIVERSAL_RESIZE,
+            editable: true,
+            droppable: false,
+          },
+          init() {
+            try {
+              // Ensure the data-te-link marker survives serialization.
+              if (!this.getAttributes()?.['data-te-link']) {
+                this.addAttributes({ 'data-te-link': '' });
+              }
+            } catch {
+              /* best-effort */
+            }
+          },
+        },
+      });
 
       // ── Container / Section component types ────────────────────────────────
       // Email blocks are table-based. A Container/Section is a `<table>` with a

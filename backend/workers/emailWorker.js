@@ -22,7 +22,7 @@ import * as supabaseService from '../services/supabaseService.js';
 import trackingConfig from '../config/tracking.js';
 import trackingEdge from '../config/trackingEdge.js';
 
-const BATCH_SIZE = 1;
+const BATCH_SIZE = 40;
 const EMAIL_DELAY_MS = Math.max(0, parseInt(process.env.EMAIL_DELAY_MS, 10) || 1000);
 const BATCH_DELAY_MS = Math.max(0, parseInt(process.env.BATCH_DELAY_MS, 10) || 5000);
 const RETRY_DELAYS = [30, 60, 120]; // seconds after attempt 1, 2, 3

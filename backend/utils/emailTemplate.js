@@ -960,6 +960,146 @@ function buildEmailScaffold(content, bg = '', width = EMAIL_SAFE_WIDTH) {
   ].join('');
 }
 
+// ─── Email link normalization ───────────────────────────────────────────────
+// Every real text hyperlink must render as ONE continuous, blue, underlined,
+// clickable <a> — even when the URL wraps across lines. Without
+// `overflow-wrap:anywhere;word-break:break-word;` the URL overflows or only the
+// first visual line stays coloured while the wrapped continuation turns black.
+// We also re-merge a pasted long URL that the browser split at a soft wrap
+// (first line inside the <a>, remainder as plain black text outside it).
+// Buttons (`data-te-button`) and social-icon anchors (<img>/<svg>/background)
+// are preserved verbatim.
+
+const LINK_STYLE =
+  'color:#0066cc !important;' +
+  'text-decoration:underline !important;' +
+  'overflow-wrap:anywhere;' +
+  'word-break:break-word;';
+
+function isLinkButton(openTag, inner) {
+  if (/\bdata-te-button\s*=/i.test(openTag)) return true;
+  if (/<img\b/i.test(inner) || /<svg\b/i.test(inner)) return true;
+  const style = getTagStyle(openTag);
+  if (/(?:^|;)\s*background(?:-color)?\s*:\s*(?!transparent|none)/i.test(style)) return true;
+  return false;
+}
+
+function addLinkStyle(openTag) {
+  let style = getTagStyle(openTag);
+  style = style
+    .replace(/color\s*:[^;]+;?/gi, '')
+    .replace(/text-decoration(-line)?\s*:[^;]+;?/gi, '')
+    .replace(/overflow-wrap\s*:[^;]+;?/gi, '')
+    .replace(/word-break\s*:[^;]+;?/gi, '')
+    .replace(/;+/g, ';')
+    .replace(/^;+|;+$/g, '');
+  const merged = LINK_STYLE + (style ? style + ';' : '');
+  return setTagStyle(openTag, merged);
+}
+
+function stripSpanConflictStyles(spanOpen) {
+  let style = getTagStyle(spanOpen);
+  if (!style) return spanOpen;
+  style = style
+    .replace(/color\s*:[^;]+;?/gi, '')
+    .replace(/text-decoration(-line)?\s*:[^;]+;?/gi, '')
+    .replace(/background(?:-color)?\s*:[^;]+;?/gi, '')
+    .replace(/;+/g, ';')
+    .replace(/^;+|;+$/g, '');
+  if (!style) return spanOpen.replace(/\s+style\s*=\s*["'][^"']*["']/i, '');
+  return setTagStyle(spanOpen, style);
+}
+
+function normalizeInnerSpans(inner) {
+  return inner.replace(/<span\b([^>]*)>/gi, (full) => stripSpanConflictStyles(full));
+}
+
+function textContentOf(html) {
+  return String(html || '').replace(/<[^>]+>/g, '');
+}
+
+function originalUrlFromHref(href) {
+  const m = href.match(/[?&]url=([^&#]+)/i);
+  if (m) {
+    try {
+      return decodeURIComponent(m[1]);
+    } catch {
+      return href;
+    }
+  }
+  return href;
+}
+
+function mergeUrlContinuation(html, startIndex, target, startText) {
+  let i = startIndex;
+  let text = startText;
+  let consumed = '';
+  while (i < html.length) {
+    const ws = /^[\s]+/.exec(html.slice(i));
+    if (ws) {
+      i += ws[0].length;
+    }
+    const br = /^<br\s*\/?>|^<wbr\s*\/?>/i.exec(html.slice(i));
+    if (br) {
+      i += br[0].length;
+      continue;
+    }
+    if (/^</.test(html.slice(i))) break;
+    const run = /^[^\s<]+/.exec(html.slice(i));
+    if (!run) break;
+    const candidate = text + run[0];
+    if (target.startsWith(candidate)) {
+      text = candidate;
+      consumed += run[0];
+      i += run[0].length;
+    } else {
+      break;
+    }
+  }
+  if (consumed) return { text: consumed, index: i };
+  return null;
+}
+
+/**
+ * Ensure every real text hyperlink is one continuous, blue, underlined,
+ * wrapping-safe <a>. Buttons/social anchors preserved. Existing anchors are
+ * normalized in place (style + nested-span + split-merge), never recreated.
+ */
+function normalizeEmailLinks(html) {
+  const ANCHOR_RE = /<a\b([^>]*)>([\s\S]*?)<\/a>/gi;
+  let result = '';
+  let lastIndex = 0;
+  let m;
+  while ((m = ANCHOR_RE.exec(html))) {
+    const openTag = '<a' + m[1] + '>';
+    const inner = m[2];
+    const hrefMatch = openTag.match(/\bhref\s*=\s*["']([^"']*)["']/i);
+    const href = hrefMatch ? hrefMatch[1] : '';
+    const isRealLink =
+      /^(?:https?:\/\/|mailto:|tel:|ftp:)/i.test(href) ||
+      /[?&]url=/.test(href);
+    let newOpen = openTag;
+    let newInner = inner;
+    if (isRealLink && !isLinkButton(openTag, inner)) {
+      newOpen = addLinkStyle(openTag);
+      newInner = normalizeInnerSpans(inner);
+      const target = originalUrlFromHref(href);
+      const baseText = textContentOf(newInner);
+      if (target.length > baseText.length) {
+        const merged = mergeUrlContinuation(html, ANCHOR_RE.lastIndex, target, baseText);
+        if (merged) {
+          newInner = newInner + merged.text;
+          ANCHOR_RE.lastIndex = merged.index;
+        }
+      }
+    }
+    result += html.slice(lastIndex, m.index) + newOpen + newInner + '</a>';
+    lastIndex = ANCHOR_RE.lastIndex;
+  }
+  result += html.slice(lastIndex);
+  return result;
+}
+
 /**
  * Convert saved template HTML (already personalized) into Gmail-safe, centered
  * email markup. Applied right before wrapHtmlDocument() in every send path.
@@ -1019,10 +1159,10 @@ function toEmailSafeHtml(html) {
   if (isFullDocument) {
     return source.replace(
       /(<body[^>]*>)([\s\S]*?)(<\/body>)/i,
-      (_m, open, _inner, close) => `${open}\n${safeBody}\n${close}`
+      (_m, open, _inner, close) => `${open}\n${normalizeEmailLinks(safeBody)}\n${close}`
     );
   }
-  return safeBody;
+  return normalizeEmailLinks(safeBody);
 }
 
 // ─── Dynamic per-recipient personalization ─────────────────────────────────
@@ -1190,4 +1330,5 @@ export {
   buildTrackedHtml,
   wrapHtmlDocument,
   toEmailSafeHtml,
+  normalizeEmailLinks,
 };

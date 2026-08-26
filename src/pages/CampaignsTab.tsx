@@ -753,12 +753,12 @@ export default function CampaignsTab({
   const [weekdayRule, setWeekdayRule] = useState('First Monday');
   const [previewOpen, setPreviewOpen] = useState(false);
 
+  // Batch / throttled sending is HARD-CODED: 30 contacts per batch, 1 hour apart.
+  // These are fixed and not user-editable — kept as constants for the send payload.
+  const BATCH_SIZE = 30;
+  const BATCH_INTERVAL_MINUTES = 60;
   const [batchEnabled, setBatchEnabled] = useState(true);
-  // Batch size is now hard-coded to 1 (one recipient per batch).
-  // The dropdown is disabled and always shows "1".
-  const [batchSize, setBatchSize] = useState(1);
-  // Batch interval is now hard-coded to 1 hour (60 minutes).
-  // The interval unit and value are read-only.
+  const [batchSize, setBatchSize] = useState(BATCH_SIZE);
   const [batchIntervalUnit, setBatchIntervalUnit] = useState<'hours'>('hours');
   const [batchIntervalValue, setBatchIntervalValue] = useState(1);
   const [previewHtml, setPreviewHtml] = useState('');
@@ -1210,12 +1210,10 @@ export default function CampaignsTab({
       schedule_time: status === 'scheduled' ? (compTime || undefined) : undefined,
       template_name: selectedTemplate?.name || null,
       template_id: selectedTemplate?.id || null,
-      batch_enabled: batchEnabled,
-      batch_size: Math.max(1, Number(batchSize) || 30),
-      batch_interval_minutes:
-        batchIntervalUnit === 'hours'
-          ? Math.max(1, Number(batchIntervalValue) || 1) * 60
-          : Math.max(1, Number(batchIntervalValue) || 1),
+      // Batch / throttled sending is HARD-CODED (30 contacts per batch, 1 hour).
+      batch_enabled: true,
+      batch_size: 30,
+      batch_interval_minutes: 60,
       schedule: includeSchedule
         ? buildScheduleInput({
             scheduleType,

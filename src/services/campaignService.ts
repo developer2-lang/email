@@ -343,10 +343,11 @@ function toInsertRow(input: CampaignInput) {
     html_content: input.html_content || input.email_body || null,
     template_name: input.template_name?.trim() || null,
     status: input.status || 'draft',
-    batch_enabled: input.batch_enabled ?? false,
-    batch_size: input.batch_size != null ? Math.max(1, Number(input.batch_size) || 30) : 30,
-    batch_interval_minutes:
-      input.batch_interval_minutes != null ? Math.max(1, Number(input.batch_interval_minutes) || 60) : 60,
+    // Batch / throttled sending is HARD-CODED: 30 contacts per batch, 1 hour
+    // between batches. The user is not allowed to change these values.
+    batch_enabled: true,
+    batch_size: 30,
+    batch_interval_minutes: 60,
     updated_at: new Date().toISOString(),
   }
 }
@@ -1140,10 +1141,11 @@ function buildCampaignRecord(payload: CampaignLaunchPayload, status: string): Re
     schedule_date: payload.schedule_date ? String(payload.schedule_date).trim() : null,
     schedule_time: payload.schedule_time ? String(payload.schedule_time).trim() : null,
     status,
-    batch_enabled: payload.batch_enabled ?? false,
-    batch_size: payload.batch_size != null ? Math.max(1, Number(payload.batch_size) || 30) : 30,
-    batch_interval_minutes:
-      payload.batch_interval_minutes != null ? Math.max(1, Number(payload.batch_interval_minutes) || 60) : 60,
+    // Batch / throttled sending is HARD-CODED: 30 contacts per batch, 1 hour
+    // between batches. The user is not allowed to change these values.
+    batch_enabled: true,
+    batch_size: 30,
+    batch_interval_minutes: 60,
   }
 }
 
