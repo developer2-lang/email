@@ -754,13 +754,9 @@ export default function CampaignsTab({
   const [previewOpen, setPreviewOpen] = useState(false);
 
   // Batch / throttled sending is HARD-CODED: 30 contacts per batch, 1 hour apart.
-  // These are fixed and not user-editable — kept as constants for the send payload.
+  // These are fixed and not user-editable. BATCH_SIZE drives the Sending Limits
+  // preview below; the send payload also hard-codes 30 / 60.
   const BATCH_SIZE = 30;
-  const BATCH_INTERVAL_MINUTES = 60;
-  const [batchEnabled, setBatchEnabled] = useState(true);
-  const [batchSize, setBatchSize] = useState(BATCH_SIZE);
-  const [batchIntervalUnit, setBatchIntervalUnit] = useState<'hours'>('hours');
-  const [batchIntervalValue, setBatchIntervalValue] = useState(1);
   const [previewHtml, setPreviewHtml] = useState('');
   const [compBody, setCompBody] = useState('');
   const [editingId, setEditingId] = useState<string | null>(null);
@@ -1111,18 +1107,8 @@ export default function CampaignsTab({
     setCompType(typeStillExists ? normalizedType : (c.campaignType || 'Custom'));
     setCompDate(c.scheduleDate);
     setCompTime(c.scheduleTime || '10:00 AM');
-    // Prefill batch / throttled-sending settings (defaults keep existing
-    // campaigns sending all recipients at once).
-    setBatchEnabled(Boolean(c.batchEnabled));
-    setBatchSize(typeof c.batchSize === 'number' ? c.batchSize : 30);
-    const savedInterval = typeof c.batchIntervalMinutes === 'number' ? c.batchIntervalMinutes : 60;
-    if (savedInterval >= 60 && savedInterval % 60 === 0) {
-      setBatchIntervalUnit('hours');
-      setBatchIntervalValue(savedInterval / 60);
-    } else {
-      setBatchIntervalUnit('minutes');
-      setBatchIntervalValue(savedInterval);
-    }
+    // Batch / throttled sending is HARD-CODED (30 contacts per batch, 1 hour) and
+    // not user-editable, so there are no per-campaign batch settings to prefill.
     // Load the campaign's saved email the way a recipient would see it: raw
     // MIME / email-source bodies are parsed down to their decoded HTML, already
     // rendered HTML is used verbatim, and legacy plain-text bodies stay plain
@@ -1296,11 +1282,7 @@ export default function CampaignsTab({
       setMonthlyOption('day');
       setDayOfMonth(15);
       setWeekdayRule('First Monday');
-      setBatchEnabled(false);
-      setBatchSize(30);
-      setBatchIntervalUnit('hours');
-      setBatchIntervalValue(1);
-setCompBody('');
+ setCompBody('');
     setBodyIsHtml(false);
     setEditorMode('text');
     setAttachments([]);
@@ -2301,121 +2283,71 @@ setCompBody('');
               </div>
 
               {/* ─── SENDING LIMITS (BATCH / THROTTLED SENDING) ─── */}
+              {/* Batch sending is HARD-CODED: 30 contacts per batch, 1 hour apart. */}
+              {/* These values are fixed and not user-editable. */}
               <div style={{ height: '1px', background: '#E5E7EB', margin: '4px 0 8px' }} />
               <div style={{ fontSize: '12px', letterSpacing: '0.05em', color: '#8A94A6', marginBottom: '12px', fontWeight: 700, textTransform: 'uppercase' }}>Sending Limits</div>
-              <div style={{ display: 'flex', flexDirection: 'column', gap: '16px' }}>
-                <label style={{ display: 'flex', alignItems: 'center', gap: '10px', fontSize: '14px', color: '#334155', cursor: 'pointer', fontWeight: 600 }}>
-                  <input
-                    type="checkbox"
-                    checked={batchEnabled}
-                    onChange={(e) => setBatchEnabled(e.target.checked)}
-                    style={{ accentColor: '#2563EB', width: '18px', height: '18px', cursor: 'pointer', margin: 0 }}
-                  />
-                  Send in batches
-                </label>
-
-                {batchEnabled && (
-                  <div style={{ display: 'flex', flexDirection: 'column', gap: '16px', paddingLeft: '8px', borderLeft: '3px solid #EFF6FF' }}>
-                    <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: '16px' }}>
-                      <div className="form-group" style={{ margin: 0 }}>
-                        <label style={{ fontSize: '14px', fontWeight: 600, color: '#334155', display: 'block', marginBottom: '6px' }}>Batch Size</label>
-                        <select
-                          value={[1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 15, 20, 25, 30, 40, 50, 100, 150, 200].includes(Number(batchSize)) ? String(batchSize) : 'custom'}
-                          onChange={(e) => {
-                            if (e.target.value === 'custom') {
-                              setBatchSize(Math.max(1, Number(batchSize) || 30));
-                            } else {
-                              setBatchSize(Number(e.target.value));
-                            }
-                          }}
-                          style={{ width: '100%', height: '48px', padding: '0 12px', border: '1px solid #E2E8F0', borderRadius: '10px', fontSize: '13px', outline: 'none', cursor: 'pointer' }}
-                        >
-                          {[1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 15, 20, 25, 30, 40, 50, 100, 150, 200].map((n) => (
-                            <option key={n} value={n}>{n}</option>
-                          ))}
-                          <option value="custom">Custom ({batchSize})</option>
-                        </select>
-                        {[1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 15, 20, 25, 30, 40, 50, 100, 150, 200].every((n) => n !== Number(batchSize)) && (
-                          <input
-                            type="number"
-                            min={1}
-                            value={batchSize}
-                            onChange={(e) => setBatchSize(Math.max(1, Number(e.target.value) || 1))}
-                            style={{ width: '100%', height: '44px', marginTop: '8px', padding: '0 12px', border: '1px solid #E2E8F0', borderRadius: '10px', fontSize: '13px', outline: 'none' }}
-                          />
-                        )}
-                      </div>
-
-                      <div className="form-group" style={{ margin: 0 }}>
-                        <label style={{ fontSize: '14px', fontWeight: 600, color: '#334155', display: 'block', marginBottom: '6px' }}>Send next batch after</label>
-                        <div style={{ display: 'flex', gap: '8px' }}>
-                          <input
-                            type="number"
-                            min={1}
-                            value={batchIntervalValue}
-                            onChange={(e) => setBatchIntervalValue(Math.max(1, Number(e.target.value) || 1))}
-                            style={{ width: '72px', height: '48px', padding: '0 10px', border: '1px solid #E2E8F0', borderRadius: '10px', fontSize: '13px', outline: 'none', textAlign: 'center' }}
-                          />
-                          <select
-                            value={batchIntervalUnit}
-                            onChange={(e) => setBatchIntervalUnit(e.target.value as 'minutes' | 'hours')}
-                            style={{ flex: 1, height: '48px', padding: '0 10px', border: '1px solid #E2E8F0', borderRadius: '10px', fontSize: '13px', outline: 'none', cursor: 'pointer' }}
-                          >
-                            <option value="minutes">Minute(s)</option>
-                            <option value="hours">Hour(s)</option>
-                          </select>
-                        </div>
-                      </div>
+              {(() => {
+                const audienceCount = getSegmentCount(compAudience);
+                const estimatedBatches = audienceCount > 0 ? Math.ceil(audienceCount / BATCH_SIZE) : 0;
+                const ranges: { n: number; start: number; end: number }[] = [];
+                for (let i = 0; i < estimatedBatches; i++) {
+                  const start = i * BATCH_SIZE + 1;
+                  const end = Math.min((i + 1) * BATCH_SIZE, audienceCount);
+                  ranges.push({ n: i + 1, start, end });
+                }
+                return (
+                  <div style={{ display: 'flex', flexDirection: 'column', gap: '16px' }}>
+                    <div style={{ display: 'flex', alignItems: 'center', gap: '10px', fontSize: '14px', color: '#334155', fontWeight: 600 }}>
+                      <span style={{ color: '#16A34A', fontSize: '16px', lineHeight: 1 }}>&#10003;</span>
+                      Send in batches
                     </div>
 
-                    {(() => {
-                      const audienceCount = getSegmentCount(compAudience);
-                      const resolvedBatchSize = Math.max(1, Number(batchSize) || 30);
-                      const intervalMinutes =
-                        batchIntervalUnit === 'hours'
-                          ? Math.max(1, batchIntervalValue) * 60
-                          : Math.max(1, batchIntervalValue);
-                      const estimatedBatches = audienceCount > 0 ? Math.ceil(audienceCount / resolvedBatchSize) : 0;
-                      const totalIntervalHours =
-                        estimatedBatches > 1 ? ((estimatedBatches - 1) * intervalMinutes) / 60 : 0;
-                      return (
-                        <div style={{ fontSize: '13px', color: '#475569', background: '#F8FAFC', border: '1px solid #E2E8F0', borderRadius: '10px', padding: '12px 14px', lineHeight: 1.6 }}>
-                          <div>
-                            <strong style={{ color: '#334155' }}>{resolvedBatchSize}</strong> contacts will be sent every{' '}
-                            <strong style={{ color: '#334155' }}>
-                              {batchIntervalValue} {batchIntervalUnit === 'hours' ? (batchIntervalValue === 1 ? 'hour' : 'hours') : batchIntervalValue === 1 ? 'minute' : 'minutes'}
-                            </strong>
-                            .
+                    <div style={{ display: 'flex', flexDirection: 'column', gap: '16px', paddingLeft: '8px', borderLeft: '3px solid #EFF6FF' }}>
+                      <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: '16px' }}>
+                        <div className="form-group" style={{ margin: 0 }}>
+                          <label style={{ fontSize: '14px', fontWeight: 600, color: '#334155', display: 'block', marginBottom: '6px' }}>Batch Size</label>
+                          <div style={{ height: '48px', display: 'flex', alignItems: 'center', padding: '0 16px', border: '1px solid #E2E8F0', borderRadius: '10px', fontSize: '13px', color: '#334155', background: '#F8FAFC' }}>
+                            30 contacts
                           </div>
-                          {audienceCount > 0 ? (
-                            <>
-                              <div style={{ marginTop: '6px' }}>
-                                Audience: <strong style={{ color: '#334155' }}>{compAudience}</strong> ({audienceCount})
-                              </div>
-                              <div style={{ marginTop: '2px' }}>
-                                Estimated batches: <strong style={{ color: '#334155' }}>{estimatedBatches}</strong>
-                              </div>
-                              <div style={{ marginTop: '2px' }}>
-                                Estimated completion: approximately{' '}
-                                <strong style={{ color: '#334155' }}>
-                                  {totalIntervalHours < 1
-                                    ? `${Math.round(totalIntervalHours * 60)} minutes`
-                                    : `${totalIntervalHours % 1 === 0 ? totalIntervalHours : totalIntervalHours.toFixed(1)} hour(s)`}
-                                </strong>{' '}
-                                after the first batch
-                              </div>
-                            </>
-                          ) : (
-                            <div style={{ marginTop: '6px', color: '#94A3B8' }}>
-                              Select an audience to estimate batches.
-                            </div>
-                          )}
                         </div>
-                      );
-                    })()}
+                        <div className="form-group" style={{ margin: 0 }}>
+                          <label style={{ fontSize: '14px', fontWeight: 600, color: '#334155', display: 'block', marginBottom: '6px' }}>Send next batch after</label>
+                          <div style={{ height: '48px', display: 'flex', alignItems: 'center', padding: '0 16px', border: '1px solid #E2E8F0', borderRadius: '10px', fontSize: '13px', color: '#334155', background: '#F8FAFC' }}>
+                            1 Hour
+                          </div>
+                        </div>
+                      </div>
+
+                      <div style={{ fontSize: '13px', color: '#475569', background: '#F8FAFC', border: '1px solid #E2E8F0', borderRadius: '10px', padding: '12px 14px', lineHeight: 1.6 }}>
+                        <div>
+                          <strong style={{ color: '#334155' }}>30</strong> contacts will be sent every{' '}
+                          <strong style={{ color: '#334155' }}>1 Hour</strong>.
+                        </div>
+                        {audienceCount > 0 ? (
+                          <>
+                            <div style={{ marginTop: '6px' }}>
+                              Audience: <strong style={{ color: '#334155' }}>{compAudience}</strong> ({audienceCount})
+                            </div>
+                            <div style={{ marginTop: '2px' }}>
+                              Estimated batches: <strong style={{ color: '#334155' }}>{estimatedBatches}</strong>
+                            </div>
+                            <div style={{ marginTop: '2px' }}>
+                              {ranges.map((r) => (
+                                <div key={r.n}>Batch {r.n}: S.No. {r.start}&ndash;{r.end}</div>
+                              ))}
+                            </div>
+                          </>
+                        ) : (
+                          <div style={{ marginTop: '6px', color: '#94A3B8' }}>
+                            Select an audience to estimate batches.
+                          </div>
+                        )}
+                      </div>
+                    </div>
                   </div>
-                )}
-              </div>
+                );
+              })()}
 
               {/* ─── ATTACHMENTS ─── */}
               <div style={{ height: '1px', background: '#E5E7EB', margin: '4px 0 8px' }} />
