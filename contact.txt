@@ -1,0 +1,1185 @@
+import React, { useState, useMemo, useEffect, useCallback } from 'react';
+import { AV_COLORS } from '../constants/constants';
+import type { Contact, ContactInput } from '../types/contact';
+import {
+fetchContacts,
+insertContact,
+updateContact,
+deleteContact,
+deleteContacts,
+insertContacts,
+} from '../services/contactsService';
+
+// Standardized icon components for sleek UI
+const SearchIcon = () => (
+
+
+
+);
+
+const PlusIcon = () => (
+
+
+
+);
+
+const UploadIcon = () => (
+
+
+
+);
+
+const SparklesIcon = () => (
+
+
+
+);
+
+const TrashIcon = () => (
+
+
+
+);
+
+const EditIcon = () => (
+
+
+
+);
+
+const SendIcon = () => (
+
+
+
+);
+
+const CloseIcon = () => (
+
+
+
+);
+
+const UsersIcon = () => (
+
+
+
+);
+
+const LeadIcon = () => (
+
+
+
+);
+
+const EngagementIcon = () => (
+
+
+
+);
+
+const EnrichmentIcon = () => (
+
+
+
+);
+
+interface ContactsTabProps {
+contacts: any[];
+apiState: { lusha: boolean; mailchimp: boolean };
+onPersistContacts: (contacts: any[]) => void;
+onToast: (msg: string, type?: string) => void;
+onNavigate: (tab: 'dashboard' | 'contacts' | 'campaigns' | 'sequences' | 'analytics' | 'settings') => void;
+isUploadModalOpen: boolean;
+setIsUploadModalOpen: (open: boolean) => void;
+onQueueSelectedContacts?: (emails: string[]) => void;
+}
+
+export default function ContactsTab({
+contacts: _propContacts,
+apiState,
+onPersistContacts,
+onToast,
+onNavigate,
+isUploadModalOpen,
+setIsUploadModalOpen,
+onQueueSelectedContacts,
+}: ContactsTabProps) {
+// ─── SUPABASE CONTACTS STATE ───
+const [contacts, setContacts] = useState<Contact[]>([]);
+const [loading, setLoading] = useState(true);
+const [fetchError, setFetchError] = useState<string | null>(null);
+
+// ─── FILTERS & PAGINATION ───
+const [cPage, setCPage] = useState(1);
+const [cSortKey, setCSortKey] = useState('name');
+const [cSortDir, setCSortDir] = useState<1 | -1>(1); // 1 = asc, -1 = desc
+const [cTypeFilter, setCTypeFilter] = useState('all');
+const [cCatFilter, setCCatFilter] = useState('');
+const [cSearchVal, setCSearchVal] = useState('');
+const [selectedIds, setSelectedIds] = useState<Set>(new Set());
+
+// ─── ADD/EDIT FORM STATE ───
+const [isContactModalOpen, setIsContactModalOpen] = useState(false);
+const [editingId, setEditingId] = useState<any | null>(null);
+const [submitting, setSubmitting] = useState(false);
+const [afName, setAfName] = useState('');
+const [afEmail, setAfEmail] = useState('');
+const [afCompany, setAfCompany] = useState('');
+const [afDesig, setAfDesig] = useState('');
+const [afIndustry, setAfIndustry] = useState('');
+const [afCity, setAfCity] = useState('');
+const [afType, setAfType] = useState('New Lead');
+const [afCat, setAfCat] = useState('OEM');
+const [afNotes, setAfNotes] = useState('');
+
+// ─── EXCEL UPLOADER STATE ───
+const [uploadFileName, setUploadFileName] = useState('');
+const [uploadBuffer, setUploadBuffer] = useState<any[]>([]);
+const [isDragging, setIsDragging] = useState(false);
+
+const C_PER_PAGE = 15;
+
+// ─── LOAD CONTACTS FROM SUPABASE ───
+const refreshContacts = useCallback(async () => {
+const { data, error } = await fetchContacts();
+if (error) {
+setFetchError(error);
+setContacts([]);
+onToast('Failed to load contacts: ' + error, 'error');
+} else {
+setFetchError(null);
+setContacts(data || []);
+onPersistContacts(data || []);
+}
+setLoading(false);
+}, [onPersistContacts, onToast]);
+
+useEffect(() => {
+const loadContacts = async () => {
+await refreshContacts();
+};
+void loadContacts();
+}, [refreshContacts]);
+
+// ─── CONTACT METRICS ───
+const metrics = useMemo(() => {
+const total = contacts.length;
+const newLeads = contacts.filter(c => c.type === 'New Lead').length;
+const highEngagement = contacts.filter(c => (c.engagement || 0) >= 70).length;
+const enriched = contacts.filter(c => c.enriched).length;
+return { total, newLeads, highEngagement, enriched };
+}, [contacts]);
+
+// ─── CONTACTS FILTERING & SORTING ───
+const filteredContacts = useMemo(() => {
+let result = [...contacts];
+
+if (cSearchVal.trim()) {
+  const search = cSearchVal.toLowerCase();
+  result = result.filter(c =>
+    (c.name || '').toLowerCase().includes(search) ||
+    (c.company || '').toLowerCase().includes(search) ||
+    (c.email || '').toLowerCase().includes(search) ||
+    (c.designation || '').toLowerCase().includes(search)
+  );
+}
+
+if (cTypeFilter !== 'all') {
+  result = result.filter(c => c.type === cTypeFilter);
+}
+
+if (cCatFilter) {
+  result = result.filter(c => c.category === cCatFilter);
+}
+
+result.sort((a, b) => {
+  const valA = (a[cSortKey as keyof Contact] ?? '').toString().toLowerCase();
+  const valB = (b[cSortKey as keyof Contact] ?? '').toString().toLowerCase();
+  if (valA < valB) return -1 * cSortDir;
+  if (valA > valB) return 1 * cSortDir;
+  return 0;
+});
+
+return result;
+
+
+}, [contacts, cSearchVal, cTypeFilter, cCatFilter, cSortKey, cSortDir]);
+
+const paginatedContacts = useMemo(() => {
+const start = (cPage - 1) * C_PER_PAGE;
+return filteredContacts.slice(start, start + C_PER_PAGE);
+}, [filteredContacts, cPage]);
+
+const totalPages = Math.ceil(filteredContacts.length / C_PER_PAGE) || 1;
+
+// ─── SORT HANDLER ───
+const handleSort = (key: string) => {
+if (cSortKey === key) {
+setCSortDir(prev => (prev === 1 ? -1 : 1));
+} else {
+setCSortKey(key);
+setCSortDir(1);
+}
+setCPage(1);
+};
+
+// ─── SELECTIONS ───
+const handleSelectOne = (id: any) => {
+setSelectedIds(prev => {
+const next = new Set(prev);
+if (next.has(id)) next.delete(id);
+else next.add(id);
+return next;
+});
+};
+
+const handleSelectAll = (checked: boolean) => {
+if (checked) {
+const ids = filteredContacts.map(c => c.id);
+setSelectedIds(new Set(ids));
+} else {
+setSelectedIds(new Set());
+}
+};
+
+// ─── ROW ACTIONS ───
+const handleDeleteContact = async (id: any) => {
+if (!confirm('Are you sure you want to delete this contact?')) return;
+const { error } = await deleteContact(String(id));
+if (error) {
+onToast('Failed to delete contact: ' + error, 'error');
+return;
+}
+setLoading(true);
+await refreshContacts();
+onToast('Contact removed', 'info');
+};
+
+const handleEnrichOne = (id: any) => {
+if (!apiState.lusha) {
+onToast('Connect Lusha in Settings & APIs to enable enrichment', 'warn');
+onNavigate('settings');
+return;
+}
+const c = contacts.find(x => x.id === id);
+if (!c) return;
+onToast(Lusha enrichment queued for ${c.name}, 'info');
+};
+
+// ─── BULK ACTIONS ───
+const handleBulkDelete = async () => {
+if (!confirm(Are you sure you want to delete ${selectedIds.size} selected contacts?)) return;
+const idsArray = Array.from(selectedIds).map(id => String(id));
+const { error } = await deleteContacts(idsArray);
+if (error) {
+onToast('Failed to delete contacts: ' + error, 'error');
+return;
+}
+setSelectedIds(new Set());
+setLoading(true);
+await refreshContacts();
+onToast(${idsArray.length} contacts deleted, 'info');
+};
+
+const handleBulkToCampaign = () => {
+const selectedEmails = filteredContacts
+.filter(c => selectedIds.has(c.id))
+.map(c => c.email)
+.filter(Boolean);
+
+if (selectedEmails.length === 0) {
+  onToast('No valid emails found in selected contacts', 'error');
+  return;
+}
+
+if (onQueueSelectedContacts) {
+  onQueueSelectedContacts(selectedEmails);
+} else {
+  onToast(`${selectedEmails.length} contacts queued for campaign`, 'success');
+}
+setSelectedIds(new Set());
+
+
+};
+
+const handleBulkEnrich = () => {
+if (!apiState.lusha) {
+onToast('Connect Lusha in Settings & APIs to enable enrichment', 'warn');
+onNavigate('settings');
+return;
+}
+onToast(Enrichment initiated for ${selectedIds.size} contacts, 'info');
+setSelectedIds(new Set());
+};
+
+// ─── MODAL OPENERS ───
+const handleOpenAddContact = () => {
+setEditingId(null);
+setAfName('');
+setAfEmail('');
+setAfCompany('');
+setAfDesig('');
+setAfIndustry('');
+setAfCity('');
+setAfType('New Lead');
+setAfCat('OEM');
+setAfNotes('');
+setIsContactModalOpen(true);
+};
+
+const handleOpenEditContact = (id: any) => {
+const c = contacts.find(x => x.id === id);
+if (!c) return;
+setEditingId(id);
+setAfName(c.name || '');
+setAfEmail(c.email || '');
+setAfCompany(c.company || '');
+setAfDesig(c.designation || '');
+setAfIndustry(c.industry || '');
+setAfCity(c.city || '');
+setAfType(c.type || 'New Lead');
+setAfCat(c.category || 'OEM');
+setAfNotes(c.notes || '');
+setIsContactModalOpen(true);
+};
+
+const handleSubmitContactForm = async () => {
+if (submitting) return;
+if (!afName.trim() || !afEmail.trim() || !afCompany.trim()) {
+onToast('Name, email and company are required', 'error');
+return;
+}
+
+const emailRegex = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
+if (!emailRegex.test(afEmail.trim())) {
+  onToast('Please enter a valid email address', 'error');
+  return;
+}
+
+const payload: ContactInput = {
+  full_name: afName.trim(),
+  email: afEmail.trim(),
+  company: afCompany.trim(),
+  designation: afDesig.trim(),
+  industry: afIndustry.trim(),
+  city: afCity.trim(),
+  contact_type: afType,
+  company_category: afCat,
+  notes: afNotes.trim(),
+};
+
+setSubmitting(true);
+try {
+  if (editingId !== null) {
+    const { error } = await updateContact(String(editingId), payload);
+    if (error) {
+      onToast('Failed to update contact: ' + error, 'error');
+      return;
+    }
+    setIsContactModalOpen(false);
+    onToast('Contact updated successfully', 'success');
+    setLoading(true);
+    await refreshContacts();
+    return;
+  }
+
+  if (contacts.some(c => c.email.toLowerCase() === payload.email.toLowerCase())) {
+    onToast('A contact with this email already exists', 'warn');
+    return;
+  }
+
+  const { data, error } = await insertContact(payload);
+  if (error) {
+    onToast(error, 'error');
+    return;
+  }
+
+  setIsContactModalOpen(false);
+  onToast(`${(data?.name || payload.full_name)} added to contacts`, 'success');
+  setLoading(true);
+  await refreshContacts();
+} finally {
+  setSubmitting(false);
+}
+
+
+};
+
+// ─── DRAG & DROP FOR IMPORT EXCEL ───
+const handleDragOver = (e: React.DragEvent) => {
+e.preventDefault();
+setIsDragging(true);
+};
+
+const handleDragLeave = () => {
+setIsDragging(false);
+};
+
+const handleDrop = (e: React.DragEvent) => {
+e.preventDefault();
+setIsDragging(false);
+if (e.dataTransfer.files && e.dataTransfer.files[0]) {
+processUploadFile(e.dataTransfer.files[0]);
+}
+};
+
+const handleFileSelect = (e: React.ChangeEvent) => {
+if (e.target.files && e.target.files[0]) {
+processUploadFile(e.target.files[0]);
+}
+};
+
+const processUploadFile = (file: File) => {
+const ext = file.name.split('.').pop()?.toLowerCase();
+if (!ext || !['xlsx', 'xls', 'csv'].includes(ext)) {
+onToast('Please upload a .xlsx, .xls, or .csv file', 'error');
+return;
+}
+setUploadFileName(file.name);
+const reader = new FileReader();
+reader.onload = (e: any) => {
+try {
+let rows: any[] = [];
+if (ext === 'csv') {
+const lines = e.target.result.split('\n').filter((l: string) => l.trim());
+const headers = lines[0].split(',').map((h: string) => h.trim().replace(/"/g, ''));
+rows = lines.slice(1).map((line: string) => {
+const vals = line.split(',').map((v: string) => v.trim().replace(/"/g, ''));
+return headers.reduce((o: any, h: string, i: number) => {
+o[h] = vals[i] || '';
+return o;
+}, {});
+});
+} else {
+const XLSX = (window as any).XLSX;
+if (!XLSX) {
+onToast('Excel parsing library not available', 'error');
+return;
+}
+const wb = XLSX.read(e.target.result, { type: 'binary' });
+rows = XLSX.utils.sheet_to_json(wb.Sheets[wb.SheetNames[0]], { defval: '' });
+}
+setUploadBuffer(rows);
+} catch (err: any) {
+onToast('Error reading file: ' + err.message, 'error');
+}
+};
+if (ext === 'csv') reader.readAsText(file);
+else reader.readAsBinaryString(file);
+};
+
+const confirmImport = async () => {
+if (uploadBuffer.length === 0) return;
+
+const existingEmails = new Set(contacts.map(c => c.email.toLowerCase().trim()));
+const toInsert: ContactInput[] = [];
+let added = 0;
+let skipped = 0;
+
+uploadBuffer.forEach((row: any) => {
+  const email = (row['Email'] || row['email'] || '').trim().toLowerCase();
+  if (!email) { skipped++; return; }
+  if (existingEmails.has(email)) { skipped++; return; }
+
+  toInsert.push({
+    full_name: row['Name'] || row['name'] || '',
+    email,
+    company: row['Company'] || row['company'] || '',
+    designation: row['Designation'] || row['designation'] || '',
+    industry: row['Industry'] || row['industry'] || '',
+    city: row['City'] || row['city'] || '',
+    contact_type: row['Contact Type'] || row['contact_type'] || 'New Lead',
+    company_category: row['Category'] || row['company_category'] || 'Domestic',
+    notes: row['Notes'] || row['notes'] || '',
+  });
+  added++;
+});
+
+if (toInsert.length > 0) {
+  const { error } = await insertContacts(toInsert);
+  if (error) {
+    onToast('Import failed: ' + error, 'error');
+    return;
+  }
+  setLoading(true);
+  await refreshContacts();
+}
+
+setIsUploadModalOpen(false);
+onToast(`${added} contacts imported ${skipped ? ` (${skipped} skipped)` : ''}`, 'success');
+setUploadBuffer([]);
+setUploadFileName('');
+
+
+};
+
+// Helper for tag style badges
+const getTypeBadgeStyle = (type: string) => {
+switch (type) {
+case 'Existing Client':
+return 'bg-emerald-50 text-emerald-700 border-emerald-200/80 dark:bg-emerald-950/50 dark:text-emerald-300 dark:border-emerald-800/60';
+case 'New Lead':
+return 'bg-blue-50 text-blue-700 border-blue-200/80 dark:bg-blue-950/50 dark:text-blue-300 dark:border-blue-800/60';
+case 'Prospect':
+return 'bg-purple-50 text-purple-700 border-purple-200/80 dark:bg-purple-950/50 dark:text-purple-300 dark:border-purple-800/60';
+case 'Newsletter':
+return 'bg-amber-50 text-amber-700 border-amber-200/80 dark:bg-amber-950/50 dark:text-amber-300 dark:border-amber-800/60';
+default:
+return 'bg-slate-100 text-slate-700 border-slate-200 dark:bg-slate-800 dark:text-slate-300 dark:border-slate-700';
+}
+};
+
+const getCategoryBadgeStyle = (category: string) => {
+switch (category) {
+case 'OEM':
+return 'bg-indigo-50/80 text-indigo-700 dark:bg-indigo-950/50 dark:text-indigo-300 border border-indigo-200/60 dark:border-indigo-800/40';
+case 'Startup':
+return 'bg-pink-50/80 text-pink-700 dark:bg-pink-950/50 dark:text-pink-300 border border-pink-200/60 dark:border-pink-800/40';
+case 'International':
+return 'bg-cyan-50/80 text-cyan-700 dark:bg-cyan-950/50 dark:text-cyan-300 border border-cyan-200/60 dark:border-cyan-800/40';
+default:
+return 'bg-slate-100 text-slate-700 dark:bg-slate-800 dark:text-slate-300 border border-slate-200/60 dark:border-slate-700/60';
+}
+};
+
+return (
+
+{/* ─── PAGE HEADER & ACTIONS ─── */}
+
+
+
+
+Contacts Directory
+
+
+{metrics.total} Records
+
+
+
+Manage, segment, and enrich audience profiles across intelligence pipelines
+
+
+
+    <div className="flex items-center gap-2.5 flex-wrap">
+      <button
+        onClick={handleOpenAddContact}
+        className="inline-flex items-center justify-center px-3.5 py-2 text-xs font-semibold rounded-lg bg-white dark:bg-slate-800 text-slate-700 dark:text-slate-200 border border-slate-300/80 dark:border-slate-700 hover:bg-slate-50 dark:hover:bg-slate-700/80 shadow-xs transition-all active:scale-[0.98]"
+      >
+        <PlusIcon /> Add Contact
+      </button>
+
+      <button
+        onClick={() => { onNavigate('settings'); onToast('Search and import leads using Lusha', 'info'); }}
+        className="inline-flex items-center justify-center px-3.5 py-2 text-xs font-semibold rounded-lg bg-amber-500/10 dark:bg-amber-500/15 text-amber-800 dark:text-amber-300 border border-amber-300/60 dark:border-amber-700/50 hover:bg-amber-500/20 shadow-xs transition-all active:scale-[0.98]"
+      >
+        <SparklesIcon /> Lusha Leads
+      </button>
+
+      <button
+        onClick={() => setIsUploadModalOpen(true)}
+        className="inline-flex items-center justify-center px-3.5 py-2 text-xs font-semibold rounded-lg bg-indigo-600 hover:bg-indigo-700 active:bg-indigo-800 text-white shadow-xs transition-all active:scale-[0.98]"
+      >
+        <UploadIcon /> Import File
+      </button>
+    </div>
+  </div>
+
+  {/* ─── OVERVIEW METRICS CARDS ─── */}
+  <div className="grid grid-cols-2 md:grid-cols-4 gap-4">
+    {/* Total Contacts */}
+    <div className="bg-white dark:bg-slate-900 p-4 rounded-xl border border-slate-200/80 dark:border-slate-800/80 shadow-xs relative overflow-hidden group hover:border-indigo-300 dark:hover:border-indigo-700/60 transition-all">
+      <div className="flex items-center justify-between">
+        <span className="text-xs font-medium text-slate-500 dark:text-slate-400">Total Contacts</span>
+        <div className="p-2 rounded-lg bg-indigo-50 dark:bg-indigo-950/50">
+          <UsersIcon />
+        </div>
+      </div>
+      <div className="text-2xl font-bold mt-2 text-slate-900 dark:text-white tracking-tight">{metrics.total}</div>
+      <span className="text-[11px] text-slate-400 dark:text-slate-500 mt-1 block">Active database profiles</span>
+    </div>
+
+    {/* New Leads */}
+    <div className="bg-white dark:bg-slate-900 p-4 rounded-xl border border-slate-200/80 dark:border-slate-800/80 shadow-xs relative overflow-hidden group hover:border-blue-300 dark:hover:border-blue-700/60 transition-all">
+      <div className="flex items-center justify-between">
+        <span className="text-xs font-medium text-slate-500 dark:text-slate-400">New Leads</span>
+        <div className="p-2 rounded-lg bg-blue-50 dark:bg-blue-950/50">
+          <LeadIcon />
+        </div>
+      </div>
+      <div className="text-2xl font-bold mt-2 text-blue-600 dark:text-blue-400 tracking-tight">{metrics.newLeads}</div>
+      <span className="text-[11px] text-slate-400 dark:text-slate-500 mt-1 block">Unqualified prospects</span>
+    </div>
+
+    {/* High Engagement */}
+    <div className="bg-white dark:bg-slate-900 p-4 rounded-xl border border-slate-200/80 dark:border-slate-800/80 shadow-xs relative overflow-hidden group hover:border-emerald-300 dark:hover:border-emerald-700/60 transition-all">
+      <div className="flex items-center justify-between">
+        <span className="text-xs font-medium text-slate-500 dark:text-slate-400">High Engagement</span>
+        <div className="p-2 rounded-lg bg-emerald-50 dark:bg-emerald-950/50">
+          <EngagementIcon />
+        </div>
+      </div>
+      <div className="text-2xl font-bold mt-2 text-emerald-600 dark:text-emerald-400 tracking-tight">{metrics.highEngagement}</div>
+      <span className="text-[11px] text-slate-400 dark:text-slate-500 mt-1 block">Engagement score ≥ 70</span>
+    </div>
+
+    {/* Enriched via Lusha */}
+    <div className="bg-white dark:bg-slate-900 p-4 rounded-xl border border-slate-200/80 dark:border-slate-800/80 shadow-xs relative overflow-hidden group hover:border-amber-300 dark:hover:border-amber-700/60 transition-all">
+      <div className="flex items-center justify-between">
+        <span className="text-xs font-medium text-slate-500 dark:text-slate-400">Enriched via Lusha</span>
+        <div className="p-2 rounded-lg bg-amber-50 dark:bg-amber-950/50">
+          <EnrichmentIcon />
+        </div>
+      </div>
+      <div className="text-2xl font-bold mt-2 text-amber-600 dark:text-amber-400 tracking-tight">{metrics.enriched}</div>
+      <span className="text-[11px] text-slate-400 dark:text-slate-500 mt-1 block">Verified contact meta</span>
+    </div>
+  </div>
+
+  {/* ─── TOOLBAR & SEGMENT TABS ─── */}
+  <div className="bg-white dark:bg-slate-900 rounded-xl border border-slate-200/80 dark:border-slate-800/80 shadow-xs overflow-hidden">
+    {/* Navigation Segment Tabs */}
+    <div className="flex items-center border-b border-slate-200/80 dark:border-slate-800/80 overflow-x-auto px-4 pt-2 scrollbar-none">
+      {[
+        { id: 'all', label: 'All Contacts' },
+        { id: 'Existing Client', label: 'Clients' },
+        { id: 'New Lead', label: 'Leads' },
+        { id: 'Prospect', label: 'Prospects' },
+        { id: 'Newsletter', label: 'Newsletter' },
+      ].map(tab => (
+        <button
+          key={tab.id}
+          onClick={() => { setCTypeFilter(tab.id); setCPage(1); }}
+          className={`px-4 py-2.5 text-xs font-medium border-b-2 whitespace-nowrap transition-all ${
+            cTypeFilter === tab.id
+              ? 'border-indigo-600 text-indigo-600 dark:text-indigo-400 font-semibold'
+              : 'border-transparent text-slate-500 hover:text-slate-700 dark:text-slate-400 dark:hover:text-slate-200'
+          }`}
+        >
+          {tab.label}
+        </button>
+      ))}
+    </div>
+
+    {/* Search & Filter Controls */}
+    <div className="p-4 flex flex-col sm:flex-row items-center justify-between gap-3 bg-slate-50/50 dark:bg-slate-900/40">
+      <div className="flex items-center gap-3 w-full sm:w-auto flex-1 max-w-xl">
+        {/* Search Input */}
+        <div className="relative flex-1">
+          <div className="absolute inset-y-0 left-0 pl-3 flex items-center pointer-events-none">
+            <SearchIcon />
+          </div>
+          <input
+            type="search"
+            className="w-full pl-9 pr-3 py-2 bg-white dark:bg-slate-800 border border-slate-300/80 dark:border-slate-700/80 rounded-lg text-xs placeholder-slate-400 text-slate-900 dark:text-slate-100 focus:outline-none focus:ring-2 focus:ring-indigo-500 focus:border-transparent transition-all shadow-2xs"
+            placeholder="Search name, company, email, role..."
+            value={cSearchVal}
+            onChange={(e) => { setCSearchVal(e.target.value); setCPage(1); }}
+          />
+        </div>
+
+        {/* Category Filter */}
+        <select
+          className="px-3 py-2 bg-white dark:bg-slate-800 border border-slate-300/80 dark:border-slate-700/80 rounded-lg text-xs text-slate-700 dark:text-slate-300 focus:outline-none focus:ring-2 focus:ring-indigo-500 transition-all cursor-pointer shadow-2xs shrink-0"
+          value={cCatFilter}
+          onChange={(e) => { setCCatFilter(e.target.value); setCPage(1); }}
+        >
+          <option value="">All Categories</option>
+          <option value="OEM">OEM</option>
+          <option value="Startup">Startup</option>
+          <option value="International">International</option>
+          <option value="Domestic">Domestic</option>
+        </select>
+      </div>
+
+      <div className="text-xs text-slate-500 dark:text-slate-400 w-full sm:w-auto text-right font-medium shrink-0">
+        Showing <span className="font-semibold text-slate-800 dark:text-slate-200">{filteredContacts.length}</span> of {contacts.length}
+      </div>
+    </div>
+
+    {/* ─── CONTACTS TABLE ─── */}
+    <div className="overflow-x-auto">
+      <table className="w-full text-left border-collapse">
+        <thead>
+          <tr className="border-y border-slate-200/80 dark:border-slate-800/80 bg-slate-50/80 dark:bg-slate-800/50 text-[11px] font-semibold tracking-wider text-slate-500 dark:text-slate-400 uppercase select-none">
+            <th className="py-3 px-4 w-10">
+              <input
+                type="checkbox"
+                className="rounded border-slate-300 dark:border-slate-700 text-indigo-600 focus:ring-indigo-500 cursor-pointer"
+                checked={filteredContacts.length > 0 && selectedIds.size === filteredContacts.length}
+                onChange={(e) => handleSelectAll(e.target.checked)}
+              />
+            </th>
+            <th className="py-3 px-4 cursor-pointer hover:text-slate-800 dark:hover:text-slate-200 transition-colors" onClick={() => handleSort('name')}>
+              <div className="flex items-center gap-1">
+                <span>Name</span>
+                {cSortKey === 'name' && <span className="text-indigo-600 dark:text-indigo-400 font-bold">{cSortDir === 1 ? '↑' : '↓'}</span>}
+              </div>
+            </th>
+            <th className="py-3 px-4 cursor-pointer hover:text-slate-800 dark:hover:text-slate-200 transition-colors" onClick={() => handleSort('company')}>
+              <div className="flex items-center gap-1">
+                <span>Company</span>
+                {cSortKey === 'company' && <span className="text-indigo-600 dark:text-indigo-400 font-bold">{cSortDir === 1 ? '↑' : '↓'}</span>}
+              </div>
+            </th>
+            <th className="py-3 px-4">Email</th>
+            <th className="py-3 px-4">Designation</th>
+            <th className="py-3 px-4">Type</th>
+            <th className="py-3 px-4">Category</th>
+            <th className="py-3 px-4 cursor-pointer hover:text-slate-800 dark:hover:text-slate-200 transition-colors" onClick={() => handleSort('engagement')}>
+              <div className="flex items-center gap-1">
+                <span>Score</span>
+                {cSortKey === 'engagement' && <span className="text-indigo-600 dark:text-indigo-400 font-bold">{cSortDir === 1 ? '↑' : '↓'}</span>}
+              </div>
+            </th>
+            <th className="py-3 px-4 w-28 text-right">Actions</th>
+          </tr>
+        </thead>
+        <tbody className="divide-y divide-slate-200/80 dark:divide-slate-800/80 text-xs">
+          {loading ? (
+            <tr>
+              <td colSpan={9} className="py-12 text-center text-slate-500 dark:text-slate-400">
+                <div className="inline-flex items-center gap-2.5">
+                  <div className="w-4 h-4 border-2 border-indigo-600 border-t-transparent rounded-full animate-spin"></div>
+                  <span className="font-medium text-xs">Loading contacts directory...</span>
+                </div>
+              </td>
+            </tr>
+          ) : paginatedContacts.length === 0 ? (
+            <tr>
+              <td colSpan={9} className="py-12 text-center">
+                <div className="max-w-xs mx-auto space-y-1">
+                  <p className="text-slate-600 dark:text-slate-300 font-semibold text-sm">No contacts found</p>
+                  <p className="text-xs text-slate-400">
+                    {fetchError ? fetchError : 'Try adjusting your search criteria or import leads.'}
+                  </p>
+                </div>
+              </td>
+            </tr>
+          ) : (
+            paginatedContacts.map((c) => {
+              const avatarBg = AV_COLORS ? AV_COLORS[(c.name || 'A').charCodeAt(0) % AV_COLORS.length] : '#3b82f6';
+              const initials = (c.name || '')
+                .split(' ')
+                .map((x: string) => x[0])
+                .join('')
+                .substring(0, 2)
+                .toUpperCase() || '??';
+
+              const score = c.engagement || 0;
+
+              return (
+                <tr
+                  key={c.id}
+                  className={`hover:bg-slate-50/80 dark:hover:bg-slate-800/40 transition-colors ${
+                    selectedIds.has(c.id) ? 'bg-indigo-50/40 dark:bg-indigo-950/20' : ''
+                  }`}
+                >
+                  <td className="py-3.5 px-4">
+                    <input
+                      type="checkbox"
+                      className="rounded border-slate-300 dark:border-slate-700 text-indigo-600 focus:ring-indigo-500 cursor-pointer"
+                      checked={selectedIds.has(c.id)}
+                      onChange={() => handleSelectOne(c.id)}
+                    />
+                  </td>
+                  <td className="py-3.5 px-4">
+                    <div className="flex items-center gap-3">
+                      <div
+                        className="w-8 h-8 rounded-full flex items-center justify-center text-white font-bold text-[10px] shrink-0 shadow-2xs border border-white/20"
+                        style={{ backgroundColor: avatarBg }}
+                      >
+                        {initials}
+                      </div>
+                      <div>
+                        <div className="font-semibold text-slate-900 dark:text-slate-100 flex items-center gap-1.5">
+                          <span>{c.name}</span>
+                          {c.enriched && (
+                            <span title="Enriched via Lusha" className="w-2 h-2 rounded-full bg-amber-500 ring-2 ring-white dark:ring-slate-900 inline-block shrink-0"></span>
+                          )}
+                        </div>
+                        <div className="text-[11px] text-slate-400 dark:text-slate-500">{c.city || '—'}</div>
+                      </div>
+                    </div>
+                  </td>
+                  <td className="py-3.5 px-4">
+                    <div className="font-medium text-slate-800 dark:text-slate-200">{c.company}</div>
+                    <div className="text-[11px] text-slate-400 dark:text-slate-500">{c.industry || '—'}</div>
+                  </td>
+                  <td className="py-3.5 px-4 font-mono text-[11px] text-slate-600 dark:text-slate-300">
+                    {c.email}
+                  </td>
+                  <td className="py-3.5 px-4 text-slate-600 dark:text-slate-300">
+                    {c.designation || '—'}
+                  </td>
+                  <td className="py-3.5 px-4">
+                    <span className={`inline-flex items-center px-2.5 py-0.5 rounded-full text-[10px] font-medium border ${getTypeBadgeStyle(c.type)}`}>
+                      {c.type}
+                    </span>
+                  </td>
+                  <td className="py-3.5 px-4">
+                    <span className={`inline-flex items-center px-2 py-0.5 rounded text-[10px] font-medium ${getCategoryBadgeStyle(c.category)}`}>
+                      {c.category}
+                    </span>
+                  </td>
+                  <td className="py-3.5 px-4">
+                    <div className="flex items-center gap-2">
+                      <div className="w-12 bg-slate-100 dark:bg-slate-800 rounded-full h-1.5 overflow-hidden">
+                        <div
+                          className={`h-full rounded-full transition-all ${
+                            score >= 70 ? 'bg-emerald-500' : score >= 40 ? 'bg-amber-500' : 'bg-slate-400 dark:bg-slate-600'
+                          }`}
+                          style={{ width: `${Math.min(100, Math.max(0, score))}%` }}
+                        ></div>
+                      </div>
+                      <span className="font-mono text-[11px] font-semibold text-slate-600 dark:text-slate-400">{score}</span>
+                    </div>
+                  </td>
+                  <td className="py-3.5 px-4 text-right">
+                    <div className="flex items-center justify-end gap-1">
+                      <button
+                        title="Enrich via Lusha"
+                        onClick={() => handleEnrichOne(c.id)}
+                        className="p-1.5 text-slate-400 hover:text-amber-500 rounded-lg hover:bg-amber-50 dark:hover:bg-amber-950/40 transition-colors"
+                      >
+                        <SparklesIcon />
+                      </button>
+                      <button
+                        title="Edit Contact"
+                        onClick={() => handleOpenEditContact(c.id)}
+                        className="p-1.5 text-slate-400 hover:text-indigo-600 dark:hover:text-indigo-400 rounded-lg hover:bg-slate-100 dark:hover:bg-slate-800 transition-colors"
+                      >
+                        <EditIcon />
+                      </button>
+                      <button
+                        title="Delete Contact"
+                        onClick={() => handleDeleteContact(c.id)}
+                        className="p-1.5 text-slate-400 hover:text-red-600 dark:hover:text-red-400 rounded-lg hover:bg-red-50 dark:hover:bg-red-950/40 transition-colors"
+                      >
+                        <TrashIcon />
+                      </button>
+                    </div>
+                  </td>
+                </tr>
+              );
+            })
+          )}
+        </tbody>
+      </table>
+    </div>
+
+    {/* ─── PAGINATION FOOTER ─── */}
+    {!loading && totalPages > 1 && (
+      <div className="px-4 py-3 border-t border-slate-200/80 dark:border-slate-800/80 flex items-center justify-between bg-slate-50/50 dark:bg-slate-900/40 text-xs">
+        <div className="text-slate-500 dark:text-slate-400">
+          Page <span className="font-semibold text-slate-800 dark:text-slate-200">{cPage}</span> of {totalPages}
+        </div>
+        <div className="flex items-center gap-1">
+          <button
+            disabled={cPage === 1}
+            onClick={() => setCPage(prev => Math.max(1, prev - 1))}
+            className="px-2.5 py-1 rounded border border-slate-300 dark:border-slate-700 bg-white dark:bg-slate-800 text-slate-600 dark:text-slate-300 disabled:opacity-40 disabled:cursor-not-allowed hover:bg-slate-50 dark:hover:bg-slate-700/60 transition-all"
+          >
+            Previous
+          </button>
+          {Array.from({ length: totalPages }, (_, i) => i + 1).map(p => (
+            <button
+              key={p}
+              onClick={() => setCPage(p)}
+              className={`w-7 h-7 rounded text-xs font-semibold transition-all ${
+                p === cPage
+                  ? 'bg-indigo-600 text-white'
+                  : 'text-slate-600 dark:text-slate-400 hover:bg-slate-200/60 dark:hover:bg-slate-800'
+              }`}
+            >
+              {p}
+            </button>
+          ))}
+          <button
+            disabled={cPage === totalPages}
+            onClick={() => setCPage(prev => Math.min(totalPages, prev + 1))}
+            className="px-2.5 py-1 rounded border border-slate-300 dark:border-slate-700 bg-white dark:bg-slate-800 text-slate-600 dark:text-slate-300 disabled:opacity-40 disabled:cursor-not-allowed hover:bg-slate-50 dark:hover:bg-slate-700/60 transition-all"
+          >
+            Next
+          </button>
+        </div>
+      </div>
+    )}
+  </div>
+
+  {/* ─── FLOATING BULK SELECTION ACTION BAR ─── */}
+  {selectedIds.size > 0 && (
+    <div className="fixed bottom-6 left-1/2 -translate-x-1/2 bg-slate-900/95 dark:bg-slate-800/95 text-white px-5 py-3 rounded-2xl shadow-2xl flex items-center gap-4 z-40 border border-slate-700/80 backdrop-blur-md">
+      <div className="text-xs font-medium flex items-center">
+        <span className="bg-indigo-600 text-white px-2 py-0.5 rounded-full font-bold mr-2 text-[11px]">{selectedIds.size}</span>
+        selected
+      </div>
+      <div className="h-4 w-px bg-slate-700"></div>
+      <div className="flex items-center gap-2">
+        <button
+          onClick={handleBulkEnrich}
+          className="px-3 py-1.5 text-xs font-medium rounded-lg bg-slate-800 hover:bg-slate-700 text-amber-300 flex items-center border border-slate-700 transition-all"
+        >
+          <SparklesIcon /> Enrich Lusha
+        </button>
+        <button
+          onClick={handleBulkToCampaign}
+          className="px-3 py-1.5 text-xs font-medium rounded-lg bg-indigo-600 hover:bg-indigo-500 text-white flex items-center transition-all"
+        >
+          <SendIcon /> Queue Campaign
+        </button>
+        <button
+          onClick={handleBulkDelete}
+          className="px-3 py-1.5 text-xs font-medium rounded-lg bg-red-600/20 hover:bg-red-600/30 text-red-300 flex items-center border border-red-500/30 transition-all"
+        >
+          <TrashIcon /> Delete
+        </button>
+      </div>
+    </div>
+  )}
+
+  {/* ─── MODAL: CONTACTS ADD/EDIT ─── */}
+  {isContactModalOpen && (
+    <div className="fixed inset-0 bg-slate-900/60 backdrop-blur-xs flex items-center justify-center p-4 z-50">
+      <div className="bg-white dark:bg-slate-900 rounded-2xl border border-slate-200 dark:border-slate-800 shadow-2xl w-full max-w-xl overflow-hidden">
+        <div className="px-6 py-4 border-b border-slate-200/80 dark:border-slate-800/80 flex items-center justify-between bg-slate-50/50 dark:bg-slate-800/30">
+          <h3 className="text-sm font-bold text-slate-900 dark:text-white">
+            {editingId !== null ? 'Edit Contact Details' : 'Add New Contact'}
+          </h3>
+          <button onClick={() => setIsContactModalOpen(false)}>
+            <CloseIcon />
+          </button>
+        </div>
+
+        <div className="p-6 space-y-4 max-h-[75vh] overflow-y-auto text-xs">
+          <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
+            <div>
+              <label className="block text-slate-700 dark:text-slate-300 font-semibold mb-1">Full Name *</label>
+              <input
+                type="text"
+                placeholder="e.g. Rajiv Sharma"
+                className="w-full px-3 py-2 border border-slate-300/80 dark:border-slate-700/80 rounded-lg bg-white dark:bg-slate-800 text-slate-900 dark:text-slate-100 focus:ring-2 focus:ring-indigo-500 focus:outline-none transition-all"
+                value={afName}
+                onChange={(e) => setAfName(e.target.value)}
+              />
+            </div>
+            <div>
+              <label className="block text-slate-700 dark:text-slate-300 font-semibold mb-1">Email Address *</label>
+              <input
+                type="email"
+                placeholder="rajiv@company.com"
+                className="w-full px-3 py-2 border border-slate-300/80 dark:border-slate-700/80 rounded-lg bg-white dark:bg-slate-800 text-slate-900 dark:text-slate-100 focus:ring-2 focus:ring-indigo-500 focus:outline-none transition-all"
+                value={afEmail}
+                onChange={(e) => setAfEmail(e.target.value)}
+              />
+            </div>
+            <div>
+              <label className="block text-slate-700 dark:text-slate-300 font-semibold mb-1">Company *</label>
+              <input
+                type="text"
+                placeholder="e.g. Bajaj Electricals"
+                className="w-full px-3 py-2 border border-slate-300/80 dark:border-slate-700/80 rounded-lg bg-white dark:bg-slate-800 text-slate-900 dark:text-slate-100 focus:ring-2 focus:ring-indigo-500 focus:outline-none transition-all"
+                value={afCompany}
+                onChange={(e) => setAfCompany(e.target.value)}
+              />
+            </div>
+            <div>
+              <label className="block text-slate-700 dark:text-slate-300 font-semibold mb-1">Designation</label>
+              <input
+                type="text"
+                placeholder="VP Product Innovation"
+                className="w-full px-3 py-2 border border-slate-300/80 dark:border-slate-700/80 rounded-lg bg-white dark:bg-slate-800 text-slate-900 dark:text-slate-100 focus:ring-2 focus:ring-indigo-500 focus:outline-none transition-all"
+                value={afDesig}
+                onChange={(e) => setAfDesig(e.target.value)}
+              />
+            </div>
+            <div>
+              <label className="block text-slate-700 dark:text-slate-300 font-semibold mb-1">Industry</label>
+              <input
+                type="text"
+                placeholder="Electrical Equipment"
+                className="w-full px-3 py-2 border border-slate-300/80 dark:border-slate-700/80 rounded-lg bg-white dark:bg-slate-800 text-slate-900 dark:text-slate-100 focus:ring-2 focus:ring-indigo-500 focus:outline-none transition-all"
+                value={afIndustry}
+                onChange={(e) => setAfIndustry(e.target.value)}
+              />
+            </div>
+            <div>
+              <label className="block text-slate-700 dark:text-slate-300 font-semibold mb-1">City</label>
+              <input
+                type="text"
+                placeholder="Mumbai"
+                className="w-full px-3 py-2 border border-slate-300/80 dark:border-slate-700/80 rounded-lg bg-white dark:bg-slate-800 text-slate-900 dark:text-slate-100 focus:ring-2 focus:ring-indigo-500 focus:outline-none transition-all"
+                value={afCity}
+                onChange={(e) => setAfCity(e.target.value)}
+              />
+            </div>
+            <div>
+              <label className="block text-slate-700 dark:text-slate-300 font-semibold mb-1">Contact Type</label>
+              <select
+                className="w-full px-3 py-2 border border-slate-300/80 dark:border-slate-700/80 rounded-lg bg-white dark:bg-slate-800 text-slate-900 dark:text-slate-100 focus:ring-2 focus:ring-indigo-500 focus:outline-none cursor-pointer transition-all"
+                value={afType}
+                onChange={(e) => setAfType(e.target.value)}
+              >
+                <option value="Existing Client">Existing Client</option>
+                <option value="New Lead">New Lead</option>
+                <option value="Prospect">Prospect</option>
+                <option value="Newsletter">Newsletter</option>
+                <option value="Partner">Partner</option>
+              </select>
+            </div>
+            <div>
+              <label className="block text-slate-700 dark:text-slate-300 font-semibold mb-1">Company Category</label>
+              <select
+                className="w-full px-3 py-2 border border-slate-300/80 dark:border-slate-700/80 rounded-lg bg-white dark:bg-slate-800 text-slate-900 dark:text-slate-100 focus:ring-2 focus:ring-indigo-500 focus:outline-none cursor-pointer transition-all"
+                value={afCat}
+                onChange={(e) => setAfCat(e.target.value)}
+              >
+                <option value="OEM">OEM</option>
+                <option value="Startup">Startup</option>
+                <option value="International">International</option>
+                <option value="Domestic">Domestic</option>
+              </select>
+            </div>
+          </div>
+
+          <div>
+            <label className="block text-slate-700 dark:text-slate-300 font-semibold mb-1">Notes & Context</label>
+            <textarea
+              rows={3}
+              placeholder="Context regarding initial discussion, background..."
+              className="w-full px-3 py-2 border border-slate-300/80 dark:border-slate-700/80 rounded-lg bg-white dark:bg-slate-800 text-slate-900 dark:text-slate-100 focus:ring-2 focus:ring-indigo-500 focus:outline-none transition-all"
+              value={afNotes}
+              onChange={(e) => setAfNotes(e.target.value)}
+            ></textarea>
+          </div>
+        </div>
+
+        <div className="px-6 py-4 bg-slate-50/80 dark:bg-slate-800/50 border-t border-slate-200/80 dark:border-slate-800/80 flex items-center justify-end gap-3">
+          <button
+            className="px-4 py-2 text-xs font-semibold rounded-lg text-slate-600 dark:text-slate-300 hover:bg-slate-200/60 dark:hover:bg-slate-800 transition-all"
+            onClick={() => setIsContactModalOpen(false)}
+          >
+            Cancel
+          </button>
+          <button
+            disabled={submitting}
+            className="px-4 py-2 text-xs font-semibold rounded-lg bg-indigo-600 hover:bg-indigo-700 text-white shadow-xs transition-all disabled:opacity-50"
+            onClick={handleSubmitContactForm}
+          >
+            {submitting ? 'Saving...' : editingId !== null ? 'Save Changes' : 'Create Contact'}
+          </button>
+        </div>
+      </div>
+    </div>
+  )}
+
+  {/* ─── MODAL: IMPORT EXCEL / CSV ─── */}
+  {isUploadModalOpen && (
+    <div className="fixed inset-0 bg-slate-900/60 backdrop-blur-xs flex items-center justify-center p-4 z-50">
+      <div className="bg-white dark:bg-slate-900 rounded-2xl border border-slate-200 dark:border-slate-800 shadow-2xl w-full max-w-2xl overflow-hidden">
+        <div className="px-6 py-4 border-b border-slate-200/80 dark:border-slate-800/80 flex items-center justify-between bg-slate-50/50 dark:bg-slate-800/30">
+          <h3 className="text-sm font-bold text-slate-900 dark:text-white">
+            Import Contacts from File
+          </h3>
+          <button onClick={() => setIsUploadModalOpen(false)}>
+            <CloseIcon />
+          </button>
+        </div>
+
+        <div className="p-6 space-y-4 text-xs">
+          <div
+            className={`border-2 border-dashed rounded-xl p-8 text-center cursor-pointer transition-all ${
+              isDragging
+                ? 'border-indigo-500 bg-indigo-50/50 dark:bg-indigo-950/20'
+                : 'border-slate-300 dark:border-slate-700 hover:border-indigo-400 bg-slate-50/50 dark:bg-slate-800/40'
+            }`}
+            onClick={() => document.getElementById('upload-file-input-tab')?.click()}
+            onDragOver={handleDragOver}
+            onDragLeave={handleDragLeave}
+            onDrop={handleDrop}
+          >
+            <div className="w-12 h-12 rounded-full bg-indigo-50 dark:bg-indigo-950/60 text-indigo-600 dark:text-indigo-400 flex items-center justify-center mx-auto mb-3">
+              <UploadIcon />
+            </div>
+            <p className="font-semibold text-slate-800 dark:text-slate-200 text-xs">
+              {uploadFileName ? `Selected: ${uploadFileName}` : 'Drag & drop Excel or CSV file here'}
+            </p>
+            <p className="text-slate-400 text-[11px] mt-1">Supports .xlsx, .xls, or .csv formats</p>
+          </div>
+
+          <input
+            type="file"
+            id="upload-file-input-tab"
+            accept=".xlsx,.xls,.csv"
+            className="hidden"
+            onChange={handleFileSelect}
+          />
+
+          <div>
+            <p className="text-[11px] font-bold text-slate-400 uppercase tracking-wider mb-2">Expected Header Format</p>
+            <div className="flex flex-wrap gap-1.5">
+              {['Name', 'Company', 'Email', 'Designation', 'Industry', 'Contact Type', 'City', 'Notes'].map(col => (
+                <span key={col} className="px-2 py-1 rounded bg-slate-100 dark:bg-slate-800 text-slate-600 dark:text-slate-400 text-[10px] font-mono border border-slate-200/60 dark:border-slate-700/60">
+                  {col}
+                </span>
+              ))}
+            </div>
+          </div>
+
+          {/* Data Preview */}
+          {uploadBuffer.length > 0 && (
+            <div className="mt-4 border border-slate-200/80 dark:border-slate-800/80 rounded-lg overflow-hidden">
+              <div className="px-3 py-2 bg-slate-100/80 dark:bg-slate-800/80 flex items-center justify-between text-[11px]">
+                <span className="font-semibold text-slate-700 dark:text-slate-300">Preview First 5 Rows</span>
+                <span className="text-emerald-600 dark:text-emerald-400 font-bold">{uploadBuffer.length} rows parsed</span>
+              </div>
+              <div className="overflow-x-auto max-h-48">
+                <table className="w-full text-left border-collapse text-[11px]">
+                  <thead>
+                    <tr className="border-b border-slate-200 dark:border-slate-800 bg-slate-50 dark:bg-slate-900 font-mono text-slate-400">
+                      {Object.keys(uploadBuffer[0] || {}).map(key => (
+                        <th key={key} className="p-2 border-r border-slate-200 dark:border-slate-800 font-medium whitespace-nowrap">
+                          {key}
+                        </th>
+                      ))}
+                    </tr>
+                  </thead>
+                  <tbody className="divide-y divide-slate-200 dark:divide-slate-800">
+                    {uploadBuffer.slice(0, 5).map((row, idx) => (
+                      <tr key={idx} className="hover:bg-slate-50 dark:hover:bg-slate-800/50">
+                        {Object.keys(uploadBuffer[0] || {}).map(key => (
+                          <td key={key} className="p-2 border-r border-slate-200 dark:border-slate-800 text-slate-600 dark:text-slate-300 truncate max-w-[120px]">
+                            {row[key] || ''}
+                          </td>
+                        ))}
+                      </tr>
+                    ))}
+                  </tbody>
+                </table>
+              </div>
+            </div>
+          )}
+        </div>
+
+        <div className="px-6 py-4 bg-slate-50/80 dark:bg-slate-800/50 border-t border-slate-200/80 dark:border-slate-800/80 flex items-center justify-end gap-3">
+          <button
+            className="px-4 py-2 text-xs font-semibold rounded-lg text-slate-600 dark:text-slate-300 hover:bg-slate-200/60 dark:hover:bg-slate-800 transition-all"
+            onClick={() => { setIsUploadModalOpen(false); setUploadBuffer([]); setUploadFileName(''); }}
+          >
+            Cancel
+          </button>
+          <button
+            disabled={uploadBuffer.length === 0}
+            className="px-4 py-2 text-xs font-semibold rounded-lg bg-indigo-600 hover:bg-indigo-700 text-white shadow-xs transition-all disabled:opacity-50 disabled:cursor-not-allowed"
+            onClick={confirmImport}
+          >
+            Confirm & Import Contacts
+          </button>
+        </div>
+      </div>
+    </div>
+  )}
+</div>
+
+
+);
+}

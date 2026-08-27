@@ -1,0 +1,3 @@
+✅ Email Intelligence backend running on http://localhost:5000
+   Health check: http://localhost:5000/api/health
+   Mailchimp routes mounted at /api/mailchimp

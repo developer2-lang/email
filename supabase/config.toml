@@ -1,0 +1,58 @@
+# Supabase CLI configuration (minimal — only what this project needs).
+project_id = "novreeapdwjnpzflyiey"
+
+# The campaign-tracker Edge Function is an open-tracking pixel loaded by email
+# clients via <img> tags, which cannot send an Authorization header — so JWT
+# verification is disabled for it.
+# Equivalent deploy command:
+#   supabase functions deploy campaign-tracker --no-verify-jwt
+[functions.campaign-tracker]
+verify_jwt = false
+
+# The click-tracker Edge Function is the redirect endpoint that email links
+# are rewritten to. It is opened directly by email clients / browsers, which
+# cannot send an Authorization header — so JWT verification is disabled.
+# Equivalent deploy command:
+#   supabase functions deploy click-tracker --no-verify-jwt
+[functions.click-tracker]
+verify_jwt = false
+
+# The scheduled-campaign-runner Edge Function is invoked by a Supabase pg_cron
+# job (see supabase/scheduled-campaign-setup.sql) via net.http_post with an
+# x-cron-secret header — NOT with a user JWT — so JWT verification is disabled.
+# The function authenticates the call by comparing x-cron-secret against the
+# CRON_SECRET env secret instead.
+# Equivalent deploy command:
+#   supabase functions deploy scheduled-campaign-runner --no-verify-jwt
+[functions.scheduled-campaign-runner]
+verify_jwt = false
+
+# The sequence-runner Edge Function is the automatic sequence worker. It is
+# invoked (a) by a Supabase pg_cron job (see supabase/sequence-runner-setup.sql)
+# via net.http_post with an x-cron-secret header, and (b) by the React app via
+# supabase.functions.invoke('sequence-runner', ...) with the project
+# anon/publishable key (a public client credential already shipped to the
+# browser) — neither is a user JWT, so JWT verification is disabled. The
+# function validates both x-cron-secret and the anon key itself.
+# Equivalent deploy command:
+#   supabase functions deploy sequence-runner --no-verify-jwt
+[functions.sequence-runner]
+verify_jwt = false
+
+# The sequence-manual-send Edge Function is the "Send Now" endpoint for a
+# sequence step. The React app calls it via supabase.functions.invoke with the
+# project anon/publishable key (same pattern as send-campaign / send-followup),
+# so JWT verification is disabled and the function validates the key itself.
+# Equivalent deploy command:
+#   supabase functions deploy sequence-manual-send --no-verify-jwt
+[functions.sequence-manual-send]
+verify_jwt = false
+
+# The email-open-tracker Edge Function is the open-tracking pixel loaded by
+# email clients via <img> tags inside sequence emails, which cannot send an
+# Authorization header — so JWT verification is disabled for it (same pattern
+# as campaign-tracker).
+# Equivalent deploy command:
+#   supabase functions deploy email-open-tracker --no-verify-jwt
+[functions.email-open-tracker]
+verify_jwt = false
